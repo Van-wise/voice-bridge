@@ -108,35 +108,12 @@ class Database:
                 ON clipboard_items(content_category)
             """)
 
-            # 同步事件表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sync_events (
-                    id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL,
-                    item_id TEXT,
-                    source_device_id TEXT,
-                    target_device_id TEXT,
-                    created_at REAL NOT NULL,
-                    payload TEXT DEFAULT '{}'
-                )
-            """)
-
             # 设置表
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at REAL NOT NULL
-                )
-            """)
-
-            # 设备分组表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS device_groups (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    sync_key TEXT,
-                    created_at REAL NOT NULL
                 )
             """)
 
@@ -166,16 +143,6 @@ class Database:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
                     color TEXT DEFAULT '#3b82f6',
-                    created_at REAL NOT NULL
-                )
-            """)
-
-            # 来源应用白名单（用于隐私保护）
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS app_whitelist (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    app_name TEXT NOT NULL,
-                    is_blocked INTEGER DEFAULT 0,
                     created_at REAL NOT NULL
                 )
             """)

@@ -13,6 +13,49 @@ from typing import Optional
 # 服务启动时间（用于计算运行时长）
 START_TIME = time.time()
 
+# 启动横幅（仅在直接运行时打印一次）
+_BANNER_LOCK_FILE = os.path.join(os.path.dirname(__file__), ".banner_printed")
+
+
+def _print_banner():
+    """打印启动横幅"""
+    try:
+        # 每次启动都删除旧锁文件，确保能重新打印
+        if os.path.exists(_BANNER_LOCK_FILE):
+            try:
+                os.remove(_BANNER_LOCK_FILE)
+            except Exception:
+                pass
+
+        local_ip = "127.0.0.1"
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+
+        banner = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        Voice Bridge 启动成功
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [ HTTP 本地访问 | 端口 7266 ]
+    本地地址  http://localhost:7266
+    引导地址  http://localhost:7266/setup
+
+  [ HTTPS 局域网 | 端口 7267 ]
+    网络地址  https://{local_ip}:7267
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        sys.stdout.write(banner)
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 from fastapi import FastAPI, Request, WebSocket, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -21,6 +64,7 @@ from shared.config import get_settings
 from shared.errors import AppError
 from shared.logging import generate_trace_id, set_trace_id, clear_trace_id
 from shared.database import get_database
+from shared.middleware import RequestLoggingMiddleware
 from devices.router import router as devices_router
 from devices.websocket import websocket_handler, manager
 from devices.microphone import audio_websocket_handler
@@ -29,11 +73,36 @@ from devices.virtual_mic_router import router as vmic_router
 from devices.ffmpeg_router import router as ffmpeg_router
 from clipboard.router import router as clipboard_router
 
+# ==================== 托盘系统（提前导入，避免 uvicorn 重入问题）====================
+_tray_started = False
+
+
+def _start_tray():
+    """后台启动托盘"""
+    global _tray_started
+    if _tray_started:
+        return
+    _tray_started = True
+    try:
+        from system_tray import start_tray
+        start_tray()
+    except Exception as e:
+        print(f"[托盘] 启动失败: {e}")
+
+
 # ==================== 日志配置 ====================
 from shared.logging import setup_logging, get_logger
 
-# 初始化日志系统（控制台 + 文件 backend/logs/vb.log）
-logger = setup_logging(log_level="INFO")
+# 打印横幅（只在直接运行 python main.py 时打印，uvicorn 导入时不打印）
+if __name__ == "__main__":
+    _print_banner()
+
+# 初始化日志系统（文件+控制台双输出）
+logger = setup_logging(log_level="INFO", enable_console=True)
+
+# 托盘在 logging 初始化后启动
+import threading
+threading.Thread(target=_start_tray, daemon=True, name="VB-Tray").start()
 
 # 周期性心跳日志
 _poll_count = 0
@@ -107,24 +176,37 @@ state = AppState()
 
 
 # ==================== 前端静态文件服务 ====================
+# 进程级别防重：使用文件锁
+_frontend_mount_marker = os.path.join(os.path.dirname(__file__), ".frontend_mounted")
+_frontend_mounted = os.path.exists(_frontend_mount_marker)
+
+
 def setup_frontend_static(app: FastAPI):
     """配置前端静态文件服务"""
+    global _frontend_mounted
+    if _frontend_mounted:
+        return
+
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
-    
+
     frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-    
+
     if frontend_dist.exists():
-        # 挂载 assets 目录
         assets_path = frontend_dist / "assets"
         if assets_path.exists():
             app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
             logger.info(f"已挂载前端静态文件: {assets_path}")
-        
-        # 挂载 public 目录（如果有 favicon 等）
+
         frontend_public = Path(__file__).parent.parent / "frontend" / "public"
         if frontend_public.exists():
             app.mount("/public", StaticFiles(directory=str(frontend_public)), name="public")
+
+    _frontend_mounted = True
+    try:
+        Path(_frontend_mount_marker).touch()
+    except Exception:
+        pass
 
 
 # ==================== 全局初始化锁（防止重复初始化） ====================
@@ -163,6 +245,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 添加请求日志中间件（简洁模式）
+app.add_middleware(RequestLoggingMiddleware, verbose=False)
+
 # CORS
 settings = get_settings()
 app.add_middleware(
@@ -175,9 +260,13 @@ app.add_middleware(
 
 
 # ==================== 错误处理 ====================
+from shared.logging import get_trace_id
+
+
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, error: AppError):
-    """处理应用错误"""
+    """处理应用业务错误"""
+    logger.warning(f"[ERROR] {error.code}: {error.message}")
     return JSONResponse(
         status_code=error.status_code,
         content=error.to_dict(),
@@ -186,11 +275,14 @@ async def app_error_handler(request: Request, error: AppError):
 
 @app.exception_handler(Exception)
 async def general_error_handler(request: Request, error: Exception):
-    """处理未捕获的错误"""
-    logger.error(f"Unhandled error: {error}", exc_info=True)
+    """处理未捕获的异常"""
+    logger.error(f"[ERROR] {type(error).__name__}: {error}")
     return JSONResponse(
         status_code=500,
-        content={"error": "INTERNAL_ERROR", "message": "An unexpected error occurred"},
+        content={
+            "error": "INTERNAL_ERROR",
+            "message": "An unexpected error occurred",
+        },
     )
 
 
@@ -499,19 +591,34 @@ async def get_info():
 
 
 @legacy_router.get("/logs")
-async def get_logs():
-    """获取运行日志（读取 backend/logs/vb.log 最近 100 条）"""
-    from shared.logging import get_log_file_path
-    logs = []
+async def get_logs(lines: int = 100, level: str = ""):
+    """
+    获取运行日志（读取 backend/logs/vb.log）
+    支持按级别过滤和行数限制
+    """
+    from shared.logging import get_log_file_path, parse_recent_logs
     log_path = get_log_file_path()
-    if os.path.exists(log_path):
-        try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                logs = [l.strip() for l in lines[-100:] if l.strip()]
-        except Exception as e:
-            logger.error(f"读取日志文件失败: {e}")
-    return {'logs': logs, 'log_file': log_path}
+    
+    if not os.path.exists(log_path):
+        return {'logs': [], 'log_file': log_path, 'total': 0}
+    
+    try:
+        # 使用新的结构化日志解析
+        logs = parse_recent_logs(lines=lines, level=level if level else None)
+        
+        # 同时返回原始文本（兼容）
+        with open(log_path, 'r', encoding='utf-8') as f:
+            raw_lines = [l.strip() for l in f.readlines()[-lines:] if l.strip()]
+        
+        return {
+            'logs': logs,
+            'raw': raw_lines,
+            'log_file': log_path,
+            'total': len(logs)
+        }
+    except Exception as e:
+        logger.error(f"读取日志文件失败: {e}")
+        return {'logs': [], 'log_file': log_path, 'error': str(e)}
 
 
 @legacy_router.post("/restart")
@@ -616,7 +723,7 @@ async def setup_page(request: Request):
     from pathlib import Path
     from fastapi.responses import FileResponse
 
-    for rel in ["frontend/dist/setup.html", "frontend/public/setup.html"]:
+    for rel in ["frontend/public/setup.html", "frontend/dist/setup.html"]:
         setup_file = Path(__file__).parent.parent / rel
         if setup_file.exists():
             return FileResponse(str(setup_file))
@@ -1443,68 +1550,40 @@ def _run_https_server(cert_file: str, key_file: str):
 
 
 def run():
-    """运行服务器（双端口模式）
-    
-    - HTTP 端口 7266: 本地电脑访问
-    - HTTPS 端口 7267: 手机/局域网访问
-    - 两个端口使用 threading 分别启动
-    """
+    """运行服务器"""
     import os
     import threading
-    
-    settings = get_settings()
-    local_ip = get_local_ip()
-    
+
     # 检查证书
     cert_dir = os.path.join(os.path.dirname(__file__), "certs")
     cert_file = os.path.join(cert_dir, "server.crt")
     key_file = os.path.join(cert_dir, "server.key")
-    
-    if not os.path.exists(cert_file) or not os.path.exists(key_file):
-        print("[ERROR] HTTPS 证书不存在，无法启动双端口模式")
-        print("[INFO] 请先运行 python backend/generate_cert.py 生成证书")
-        return
-    
+    has_https = os.path.exists(cert_file) and os.path.exists(key_file)
+
     # 检查端口
     port_results = check_ports_available()
     unavailable = [p for p, ok, _ in port_results if not ok]
-    
+
     if unavailable:
-        print(f"[ERROR] 端口 {unavailable} 已被占用")
-        print("[INFO] 请先关闭占用端口的程序")
+        logger.error(f"端口 {unavailable} 已被占用")
         return
-    
-    # 打印启动信息
-    print()
-    print("=" * 60)
-    print("Voice Bridge 启动成功 (双端口模式)")
-    print("=" * 60)
-    print()
-    print("[HTTP 本地访问 | 端口 7266 | 无需证书]")
-    print(f"主访问地址：http://localhost:7266")
-    print(f"证书安装引导：http://localhost:7266/setup")
-    print()
-    print("[HTTPS 局域网访问 | 端口 7267 | 手机端专用]")
-    print(f"访问地址：https://{local_ip}:7267")
-    print("使用说明：浏览器点「高级→继续访问」即可使用")
-    print()
-    print("按 Ctrl+C 停止服务")
-    print("=" * 60)
-    print()
-    
-    # 启动两个服务线程
+
+    # 启动服务线程
     http_thread = threading.Thread(target=_run_http_server, daemon=True, name="VB-HTTP-7266")
-    https_thread = threading.Thread(target=_run_https_server, args=(cert_file, key_file), daemon=True, name="VB-HTTPS-7267")
-    
     http_thread.start()
-    https_thread.start()
-    
+
+    # HTTPS 线程（如果有证书）
+    https_thread = None
+    if has_https:
+        https_thread = threading.Thread(target=_run_https_server, args=(cert_file, key_file), daemon=True, name="VB-HTTPS-7267")
+        https_thread.start()
+
     try:
-        # 主线程等待子线程
         while True:
             http_thread.join(timeout=1)
-            https_thread.join(timeout=1)
-            if not http_thread.is_alive() and not https_thread.is_alive():
+            if https_thread:
+                https_thread.join(timeout=1)
+            if not http_thread.is_alive():
                 break
     except KeyboardInterrupt:
         print("\n正在停止服务...")
