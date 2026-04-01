@@ -1,0 +1,57 @@
+# =============================================
+# Voice Bridge - .gitignore
+# =============================================
+
+# ---- 运行时数据（用户私有）----
+server/settings.json
+server/history.json
+backend/voice_bridge.db
+backend/audio_uploads/
+backend/debug_audio/
+backend/clipboard/
+
+# ---- 运行时缓存 ----
+__pycache__/
+backend/__pycache__/
+backend/*/__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ---- 前端构建产物 ----
+# ✅ 保留 dist/ - 用户无需 npm install 可直接运行
+# frontend/dist/
+# frontend/.vite/
+
+# ---- 日志文件 ----
+server/logs/
+*.log
+*.log.*
+*.trace
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- node_modules（不提交）----
+# ✅ 不提交，节省 77 MB
+# 用户运行 `npm install` 安装依赖
+node_modules/
+frontend/node_modules/
+
+# ---- 打包产物 ----
+*.exe
+*.spec
+build/
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

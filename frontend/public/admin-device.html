@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Bridge · 设备管理</title>
+  <style>
+    :root {
+      --blue: #2563eb;
+      --blue-light: #eff6ff;
+      --green: #16a34a;
+      --green-light: #f0fdf4;
+      --red: #dc2626;
+      --red-light: #fef2f2;
+      --orange: #ea580c;
+      --orange-light: #fff7ed;
+      --gray: #6b7280;
+      --gray-light: #f3f4f6;
+      --border: #e5e7eb;
+      --bg: #f0f4f8;
+      --text: #111827;
+      --card-shadow: 0 2px 12px rgba(0,0,0,.07);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 20px 16px 60px;
+    }
+
+    .header {
+      max-width: 860px;
+      margin: 0 auto 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .header h1 { font-size: 20px; font-weight: 800; color: var(--blue); }
+    .header p  { font-size: 13px; color: var(--gray); margin-top: 2px; }
+    .header-right { display: flex; gap: 8px; align-items: center; }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 0;
+      margin: 0 auto 16px;
+      max-width: 860px;
+      box-shadow: var(--card-shadow);
+      border: 1px solid rgba(0,0,0,.04);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-title { font-size: 13px; font-weight: 700; color: var(--gray); letter-spacing: .05em; text-transform: uppercase; }
+
+    /* 统计栏 */
+    .stats {
+      max-width: 860px;
+      margin: 0 auto 16px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .stat-chip {
+      background: #fff;
+      border-radius: 12px;
+      padding: 10px 16px;
+      box-shadow: var(--card-shadow);
+      border: 1px solid rgba(0,0,0,.04);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .stat-chip .num { font-size: 20px; font-weight: 800; }
+    .stat-chip.online  .num { color: var(--green); }
+    .stat-chip.offline .num { color: var(--gray); }
+    .stat-chip.total   .num { color: var(--blue); }
+
+    /* 设备表格 */
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      background: var(--gray-light);
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--gray);
+      text-align: left;
+      letter-spacing: .04em;
+      white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #fafafa; }
+    tbody td {
+      padding: 12px 14px;
+      font-size: 13px;
+      vertical-align: middle;
+    }
+
+    /* 状态徽章 */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 99px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-online  { background: var(--green-light); color: var(--green); }
+    .badge-offline { background: var(--gray-light);  color: var(--gray); }
+    .badge-desktop { background: var(--blue-light);  color: var(--blue); }
+    .badge-mobile  { background: var(--orange-light); color: var(--orange); }
+
+    /* 操作按钮 */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity .15s, transform .1s;
+      text-decoration: none;
+    }
+    .btn:active { transform: scale(.96); opacity: .9; }
+    .btn-primary   { background: var(--blue); color: #fff; }
+    .btn-secondary { background: var(--blue-light); color: var(--blue); }
+    .btn-danger    { background: var(--red-light); color: var(--red); }
+    .btn-gray      { background: var(--gray-light); color: var(--text); }
+    .btn:disabled  { opacity: .45; cursor: not-allowed; }
+
+    .action-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+
+    /* ID 小字 */
+    .device-id { font-size: 11px; color: var(--gray); font-family: monospace; margin-top: 2px; }
+    .device-name-big { font-weight: 700; font-size: 14px; }
+
+    /* 重命名 inline */
+    .rename-form { display: flex; gap: 6px; align-items: center; }
+    .rename-form input {
+      padding: 6px 10px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+      min-width: 100px;
+      max-width: 160px;
+      transition: border-color .2s;
+    }
+    .rename-form input:focus { border-color: var(--blue); }
+
+    /* 空状态 */
+    .empty {
+      text-align: center;
+      padding: 48px 20px;
+      color: var(--gray);
+    }
+    .empty .ico { font-size: 36px; margin-bottom: 10px; }
+
+    /* 加载 */
+    .loading {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--gray);
+      font-size: 14px;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed; bottom: 36px; left: 50%;
+      transform: translateX(-50%);
+      background: #111; color: #fff;
+      padding: 9px 20px;
+      border-radius: 99px;
+      font-size: 14px;
+      z-index: 9999;
+      white-space: nowrap;
+      transition: opacity .4s;
+    }
+
+    /* 刷新按钮动画 */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinning { animation: spin .8s linear infinite; display: inline-block; }
+
+    /* 响应式 */
+    @media (max-width: 600px) {
+      thead th:nth-child(3),
+      tbody td:nth-child(3) { display: none; }
+      thead th:nth-child(4),
+      tbody td:nth-child(4) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🌉 Voice Bridge · 设备管理</h1>
+    <p id="serverInfo">正在获取服务信息…</p>
+  </div>
+  <div class="header-right">
+    <button class="btn btn-secondary" onclick="refresh()" id="refreshBtn">🔄 刷新</button>
+    <a class="btn btn-gray" href="/" target="_blank">← 返回主页</a>
+  </div>
+</div>
+
+<!-- 统计 -->
+<div class="stats" id="statsBar">
+  <div class="stat-chip total"><div class="num" id="statTotal">—</div><div>设备总数</div></div>
+  <div class="stat-chip online"><div class="num" id="statOnline">—</div><div>在线设备</div></div>
+  <div class="stat-chip offline"><div class="num" id="statOffline">—</div><div>离线设备</div></div>
+</div>
+
+<!-- 设备列表 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">📋 已注册设备</div>
+    <div style="font-size:12px;color:var(--gray)">在线判定：10 秒内有心跳</div>
+  </div>
+  <div id="tableWrap">
+    <div class="loading">⚙️ 加载中…</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict'
+
+  const API = ''  // 同域
+  let devices = []
+  let autoTimer = null
+
+  // ── 工具 ──
+  function toast(msg) {
+    let t = document.querySelector('.toast')
+    if (t) t.remove()
+    t = document.createElement('div')
+    t.className = 'toast'
+    t.textContent = msg
+    document.body.appendChild(t)
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400) }, 2200)
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  }
+
+  function fmtType(t) {
+    if (t === 'mobile') return '<span class="badge badge-mobile">📱 手机</span>'
+    return '<span class="badge badge-desktop">🖥️ 电脑</span>'
+  }
+
+  function fmtStatus(s) {
+    if (s === 'online') return '<span class="badge badge-online">● 在线</span>'
+    return '<span class="badge badge-offline">○ 离线</span>'
+  }
+
+  // ── 获取设备列表 ──
+  async function fetchDevices() {
+    try {
+      const res = await fetch('/api/admin/devices')
+      if (!res.ok) {
+        if (res.status === 403) {
+          document.getElementById('tableWrap').innerHTML =
+            '<div class="empty"><div class="ico">🔒</div><p>设备管理页面仅服务端本机可访问</p></div>'
+          return
+        }
+        throw new Error('请求失败')
+      }
+      const data = await res.json()
+      devices = data.devices || []
+      renderTable()
+      updateStats()
+    } catch (e) {
+      document.getElementById('tableWrap').innerHTML =
+        '<div class="empty"><div class="ico">⚠️</div><p>加载失败，请检查服务是否运行</p></div>'
+    }
+  }
+
+  function updateStats() {
+    const online  = devices.filter(d => d.status === 'online').length
+    document.getElementById('statTotal').textContent  = devices.length
+    document.getElementById('statOnline').textContent = online
+    document.getElementById('statOffline').textContent = devices.length - online
+  }
+
+  function renderTable() {
+    const wrap = document.getElementById('tableWrap')
+    if (!devices.length) {
+      wrap.innerHTML = '<div class="empty"><div class="ico">📭</div><p>暂无已注册设备</p></div>'
+      return
+    }
+
+    const rows = devices.map(d => `
+      <tr id="row-${esc(d.device_id)}">
+        <td>
+          <div class="device-name-big" id="name-${esc(d.device_id)}">${esc(d.device_name || '(未命名)')}</div>
+          <div class="device-id">${esc(d.device_id)}</div>
+        </td>
+        <td>${fmtStatus(d.status)}</td>
+        <td>${fmtType(d.device_type || 'desktop')}</td>
+        <td style="font-family:monospace;font-size:12px">${esc(d.last_ip || '—')}</td>
+        <td style="font-size:12px;white-space:nowrap">${esc(d.last_time || '—')}</td>
+        <td>
+          <div class="action-cell">
+            <button class="btn btn-secondary" onclick="startRename('${esc(d.device_id)}')">✏️ 重命名</button>
+            <button class="btn btn-danger"    onclick="deleteDevice('${esc(d.device_id)}')">🗑️ 删除</button>
+          </div>
+        </td>
+      </tr>
+    `).join('')
+
+    wrap.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>设备名称 / ID</th>
+            <th>状态</th>
+            <th>类型</th>
+            <th>最后 IP</th>
+            <th>最后活跃</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`
+  }
+
+  // ── 重命名 ──
+  window.startRename = function(deviceId) {
+    const d = devices.find(x => x.device_id === deviceId)
+    if (!d) return
+    const nameEl = document.getElementById('name-' + deviceId)
+    const actionCell = nameEl.parentElement.parentElement.querySelector('.action-cell')
+
+    nameEl.innerHTML = `
+      <div class="rename-form">
+        <input type="text" id="ri-${esc(deviceId)}" value="${esc(d.device_name)}" maxlength="32" placeholder="输入新名称…">
+        <button class="btn btn-primary" onclick="doRename('${esc(deviceId)}')">保存</button>
+        <button class="btn btn-gray"    onclick="cancelRename('${esc(deviceId)}', '${esc(d.device_name)}')">取消</button>
+      </div>`
+    const inp = document.getElementById('ri-' + deviceId)
+    if (inp) { inp.focus(); inp.select() }
+  }
+
+  window.cancelRename = function(deviceId, oldName) {
+    const nameEl = document.getElementById('name-' + deviceId)
+    nameEl.innerHTML = esc(oldName || '(未命名)')
+  }
+
+  window.doRename = async function(deviceId) {
+    const inp = document.getElementById('ri-' + deviceId)
+    if (!inp) return
+    const name = inp.value.trim()
+    if (!name) { toast('⚠️ 名称不能为空'); return }
+
+    inp.disabled = true
+    try {
+      const res = await fetch(`/api/admin/device/${encodeURIComponent(deviceId)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_name: name })
+      })
+      if (!res.ok) throw new Error('失败')
+      toast('✅ 已重命名')
+      // 更新本地数据
+      const d = devices.find(x => x.device_id === deviceId)
+      if (d) d.device_name = name
+      const nameEl = document.getElementById('name-' + deviceId)
+      if (nameEl) nameEl.innerHTML = esc(name)
+    } catch (e) {
+      toast('❌ 重命名失败')
+      inp.disabled = false
+    }
+  }
+
+  // ── 删除 ──
+  window.deleteDevice = async function(deviceId) {
+    const d = devices.find(x => x.device_id === deviceId)
+    const name = d ? d.device_name : deviceId.slice(0, 8)
+    if (!confirm(`确认删除设备「${name}」？\n\n该设备下次访问时会自动重新注册。`)) return
+
+    try {
+      const res = await fetch(`/api/admin/device/${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE'
+      })
+      if (!res.ok) throw new Error('失败')
+      toast(`✅ 已删除「${name}」`)
+      // 移除行
+      const row = document.getElementById('row-' + deviceId)
+      if (row) row.remove()
+      devices = devices.filter(x => x.device_id !== deviceId)
+      updateStats()
+      if (!devices.length) renderTable()
+    } catch (e) {
+      toast('❌ 删除失败')
+    }
+  }
+
+  // ── 刷新 ──
+  window.refresh = function() {
+    const btn = document.getElementById('refreshBtn')
+    btn.innerHTML = '<span class="spinning">🔄</span> 刷新中…'
+    btn.disabled = true
+    fetchDevices().then(() => {
+      btn.innerHTML = '🔄 刷新'
+      btn.disabled = false
+    })
+  }
+
+  // ── 获取服务信息 ──
+  async function getServerInfo() {
+    try {
+      const res = await fetch('/api/setup/info')
+      const data = await res.json()
+      document.getElementById('serverInfo').textContent =
+        `服务端 IP：${data.server_ip}  ·  HTTP :${data.http_port}  ·  HTTPS :${data.https_port}`
+    } catch (e) {
+      document.getElementById('serverInfo').textContent = '服务信息获取失败'
+    }
+  }
+
+  // ── 自动刷新（10 秒）──
+  function startAutoRefresh() {
+    if (autoTimer) clearInterval(autoTimer)
+    autoTimer = setInterval(fetchDevices, 10000)
+  }
+
+  // ── 初始化 ──
+  getServerInfo()
+  fetchDevices()
+  startAutoRefresh()
+})()
+</script>
+
+</body>
+</html>

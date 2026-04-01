@@ -1,0 +1,2088 @@
+<template>
+  <div class="mic-wrap">
+
+    <!-- ══════════════════════════════════════════════════
+         卡片 0：🎤 手机麦克风桥接（新增核心功能）
+    ═══════════════════════════════════════════════════════ -->
+    <div class="mic-card bridge-card" :class="{ active: micBridgeActive }">
+      <div class="mic-card-header" @click="toggle(0)">
+        <div class="mic-card-title">
+          <span class="mic-icon">🎤</span>
+          <span>手机麦克风</span>
+          <span class="mic-badge" :class="micBridgeActive ? 'green' : 'gray'">
+            {{ micBridgeActive ? '已激活' : '未启动' }}
+          </span>
+        </div>
+        <div class="mic-card-meta">
+          <span v-if="micBridgeActive" class="meta-tag live-dot">● 实时传输中</span>
+          <span v-else-if="micBridgeConnecting" class="meta-tag gray">连接中…</span>
+          <span class="chevron" :class="{ open: openCard === 0 }">›</span>
+        </div>
+      </div>
+
+      <div class="mic-card-body" v-show="openCard === 0">
+        <!-- 主操作区 -->
+        <div class="bridge-main">
+          <!-- 状态显示 -->
+          <div class="bridge-status">
+            <div class="status-indicator" :class="{
+              active: micBridgeActive,
+              connecting: micBridgeConnecting,
+              error: micBridgeError
+            }">
+              <div class="status-ring"></div>
+              <div class="status-dot"></div>
+            </div>
+            <div class="status-text">
+              <div class="status-title">{{ bridgeStatusText }}</div>
+              <div class="status-sub" v-if="micBridgeActive">
+                {{ micBridgeActive ? '🎤 电脑正在使用手机麦克风' : '' }}
+                <span v-if="vmicStatus && !vmicStatus.active" class="vmic-warning">
+                  ⚠️ 虚拟麦克风未就绪
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 音频电平条 -->
+          <div class="bridge-levels" v-if="micBridgeActive">
+            <div class="level-bar">
+              <div class="level-fill" :style="{ width: micVolumeLevel + '%' }"></div>
+            </div>
+            <span class="level-label">{{ micVolumeLevel }}%</span>
+          </div>
+
+          <!-- 统一操作按钮（点击=长时模式，按住=按住说话） -->
+        <div class="bridge-actions">
+          <button
+            class="bridge-btn unified-btn"
+            :class="{ active: micBridgeActive, connecting: micBridgeConnecting, 'push-mode': micMode === 'push' }"
+            @mousedown="onUnifiedBtnDown"
+            @mouseup="onUnifiedBtnUp"
+            @mouseleave="onUnifiedBtnLeave"
+            @touchstart.prevent="onUnifiedBtnDown"
+            @touchend.prevent="onUnifiedBtnUp"
+          >
+            <span v-if="micBridgeActive && micMode === 'continuous'">⏹ 长时模式运行中</span>
+            <span v-else-if="micBridgeActive && micMode === 'push'">🔴 录音中（松开停止）</span>
+            <span v-else-if="micBridgeConnecting">⏳ 连接中…</span>
+            <span v-else>🎤 开始</span>
+          </button>
+          <div class="unified-hint">
+            <span v-if="!micBridgeActive">点击开始长时模式 · 按住可随时松手</span>
+            <span v-else-if="micMode === 'continuous'">点击「停止」结束</span>
+            <span v-else>已切换为按住说话</span>
+          </div>
+        </div>
+        </div>
+
+        <!-- 错误提示 -->
+        <div class="error-bar" v-if="micBridgeError">
+          <div v-if="micBridgeError === 'VIRTUAL_CABLE_NOT_FOUND'">
+            ⚠️ 未找到虚拟麦克风设备
+            <br>
+            <span class="error-sub">请先安装 VB-Audio Virtual Cable → 系统设置 → 设为默认麦克风</span>
+          </div>
+          <div v-else-if="micBridgeError === 'MIC_PERMISSION_DENIED'">
+            🎤 麦克风权限被拒绝
+            <br>
+            <span class="error-sub">请在浏览器地址栏左侧点击🔒 → 麦克风 → 设为「允许」</span>
+          </div>
+          <div v-else-if="micBridgeError === 'MIC_NOT_FOUND'">
+            🎤 未找到麦克风设备
+            <br>
+            <span class="error-sub">请确保手机麦克风正常工作</span>
+          </div>
+          <div v-else-if="micBridgeError === 'MIC_NOT_SUPPORTED'">
+            ⚠️ 非安全环境检测
+            <br>
+            <span class="error-sub">当前不是 HTTPS 访问，浏览器可能拒绝麦克风权限</span>
+            <div class="insecure-actions">
+              <button class="btn-warning" @click="forceInsecureMode">⚡ 强制尝试</button>
+              <span class="insecure-hint">（可能无效，取决于浏览器）</span>
+            </div>
+          </div>
+          <div v-else-if="micBridgeError === 'VMIC_INIT_TIMEOUT'">
+            ⏱️ 虚拟麦克风初始化超时
+            <br>
+            <span class="error-sub">后端处理超时，可能是 FFmpeg/sounddevice 初始化失败。请重启电脑端 Voice Bridge 后重试。</span>
+          </div>
+          <div v-else>{{ micBridgeError }}</div>
+        </div>
+
+        <!-- 提示框：整合所有提示 -->
+        <div class="bridge-tip-box" v-if="!micBridgeActive && !micBridgeConnecting">
+          <!-- HTTP 模式警告：仅手机端 + HTTP 时显示，两个按钮并排 -->
+          <div v-if="showMicRestrictedWarning" class="tip-item warning-item">
+            <div class="warning-content">
+              <span class="warning-icon">⚠️</span>
+              <span class="warning-text">当前为 HTTP 访问，手机端麦克风功能受限</span>
+            </div>
+            <div class="warning-buttons">
+              <button class="tip-link" @click="switchToHttps">前往HTTPS →</button>
+              <button class="tip-link" @click="openCertGuide">前往引导页 →</button>
+            </div>
+          </div>
+          
+          <div class="tip-title">💡 使用说明</div>
+          <div class="tip-item">🎤 <strong>单击</strong>：长时连接（点击停止断开）</div>
+          <div class="tip-item">🔴 <strong>按住</strong>：按住说话（松手即断开）</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════
+         卡片 1：录音（统一录音功能 - 点击/长按都录音）
+    ═══════════════════════════════════════════════════════ -->
+    <div class="mic-card" :class="{ expanded: openCard === 1 }" v-if="micAvailable">
+      <div class="mic-card-header" @click="toggle(1)">
+        <div class="mic-card-title">
+          <span class="mic-icon">🎤</span>
+          <span>录音</span>
+        </div>
+        <div class="mic-card-meta">
+          <span v-if="isRecording" class="meta-tag red">● {{ formatDuration(recordingDuration) }}</span>
+          <span v-else-if="uploadCount > 0" class="meta-tag">{{ uploadCount }}条已发</span>
+          <span class="chevron" :class="{ open: openCard === 1 }">›</span>
+        </div>
+      </div>
+      <div class="mic-card-body" v-show="openCard === 1">
+        <!-- 统一录音按钮（点击开始，长按也可） -->
+        <div class="record-unified-area">
+          <button
+            class="rec-unified-btn"
+            :class="{ recording: isRecording, uploading: isUploading }"
+            @mousedown="startLiveRecording"
+            @mouseup="stopLiveRecording"
+            @mouseleave="isRecording && stopLiveRecording()"
+            @touchstart.prevent="startLiveRecording"
+            @touchend.prevent="stopLiveRecording"
+            :disabled="isUploading && !isRecording"
+          >
+            <span v-if="isRecording" class="rec-icon">🔴</span>
+            <span v-else-if="isUploading" class="spinner-icon">⏳</span>
+            <span v-else class="rec-icon">🎤</span>
+          </button>
+          <div class="rec-hint">
+            {{ isRecording ? `录音中 ${formatDuration(recordingDuration)}` : '点击或按住说话' }}
+          </div>
+          <!-- 录音音量指示 -->
+          <div class="volume-bar" v-if="isRecording">
+            <div class="volume-level" :style="{ width: volumeLevel + '%' }"></div>
+          </div>
+        </div>
+
+        <div class="success-bar" v-if="lastUploadTime">
+          ✅ 已发送 {{ formatTime(lastUploadTime) }}
+        </div>
+        <div class="error-bar" v-if="error && openCard === 1">
+          ⚠️ {{ error }}
+          <div v-if="httpsError" class="error-sub">需要 HTTPS 才能使用此功能</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════
+         卡片 3：录音记录
+    ═══════════════════════════════════════════════════════ -->
+    <div class="mic-card" :class="{ expanded: openCard === 3 }">
+      <div class="mic-card-header" @click="toggleRecordings">
+        <div class="mic-card-title">
+          <span class="mic-icon">📼</span>
+          <span>录音记录</span>
+          <span v-if="recordings.length > 0" class="mic-badge green">{{ recordings.length }}</span>
+        </div>
+        <div class="mic-card-meta">
+          <span class="chevron" :class="{ open: openCard === 3 }">›</span>
+        </div>
+      </div>
+      <div class="mic-card-body" v-show="openCard === 3">
+        <div class="receive-row">
+          <span class="receive-label">📡 电脑端接收</span>
+          <button
+            class="receive-toggle"
+            :class="{ active: isReceiving }"
+            @click.stop="toggleReceive"
+          >
+            {{ isReceiving ? '🔊 开启' : '🔇 关闭' }}
+          </button>
+          <span v-if="isReceiving" class="ws-status" :class="wsConnected ? 'live' : 'poll'">
+            {{ wsConnected ? '实时' : '轮询' }}
+          </span>
+        </div>
+
+        <div v-if="recordings.length === 0" class="empty-tip">暂无录音，发送后自动显示</div>
+        <ul v-else class="rec-list">
+          <li
+            v-for="rec in recordings"
+            :key="rec.audio_id"
+            class="rec-item"
+            :class="{ playing: playingId === rec.audio_id }"
+          >
+            <div class="rec-info">
+              <span class="rec-time">{{ formatTime(rec.timestamp) }}</span>
+              <span class="rec-size">{{ formatSize(rec.size) }}</span>
+              <span class="rec-device" v-if="rec.device_id && rec.device_id !== 'unknown'">
+                📱 {{ shortId(rec.device_id) }}
+              </span>
+            </div>
+            <div class="rec-actions">
+              <button
+                class="rec-btn play"
+                :class="{ active: playingId === rec.audio_id }"
+                @click.stop="playAudio(rec)"
+                :title="playingId === rec.audio_id ? '正在播放' : '播放'"
+              >
+                {{ playingId === rec.audio_id ? '⏸' : '▶' }}
+              </button>
+              <button class="rec-btn del" @click.stop="deleteRecording(rec.audio_id)" title="删除">🗑</button>
+            </div>
+          </li>
+        </ul>
+
+        <div class="rec-footer" v-if="recordings.length > 0">
+          <button class="link-btn" @click.stop="loadRecordings">🔄 刷新</button>
+          <button class="link-btn danger" @click.stop="clearAllRecordings">🧹 清空</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { useWebSocket } from '../composables/useWebSocket'
+import { logger } from '../utils/logger'
+
+const props = defineProps<{ deviceId: string }>()
+
+// ─── 安全上下文和设备检测 ─────────────────────────────────────────────────────────
+// 检测是否为安全上下文（麦克风可用）
+const isSecureContext = computed(() => {
+  return window.location.protocol === 'https:' || 
+         window.location.hostname === 'localhost' || 
+         window.location.hostname === '127.0.0.1'
+})
+
+// 检测是否为手机端（通过 User Agent）
+const isMobileDevice = computed(() => {
+  const ua = navigator.userAgent.toLowerCase()
+  return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua)
+})
+
+// 是否显示麦克风受限提示：仅当「手机端 + HTTP协议」时显示
+// 电脑端 localhost 的 HTTP 访问不受限
+const showMicRestrictedWarning = computed(() => {
+  const isHttp = window.location.protocol === 'http:'
+  const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  // 手机端 + HTTP = 显示警告
+  // 电脑端 localhost + HTTP = 不显示（浏览器安全上下文，麦克风可用）
+  return isMobileDevice.value && isHttp && !isLocalhost
+})
+
+// 切换到 HTTPS（跳转到 7267 端口）
+function switchToHttps() {
+  const host = window.location.hostname
+  // 使用 7267 端口（HTTPS 端口）
+  window.open(`https://${host}:7267`, '_self')
+}
+
+// ─── WebSocket（电脑端实时接收）────────────────────────────────────────────
+const { connected: wsConnected, lastMessage, connect: wsConnect, disconnect: wsDisconnect } = useWebSocket(props.deviceId + '_pc')
+
+// ─── 卡片折叠状态 ─────────────────────────────────────────────────────────
+const openCard = ref<number | null>(null)
+
+function toggle(n: number) {
+  logger.debug('Toggle', `Card: ${n}, Active: ${micBridgeActive.value}, Open: ${openCard.value}`)
+  
+  // 卡片0（手机麦克风）特殊处理：激活时点击只折叠，不断开连接
+  // 断开连接必须点击"停止"按钮
+  if (n === 0 && micBridgeActive.value) {
+    // 激活时：折叠卡片但不停止麦克风
+    openCard.value = openCard.value === 0 ? null : 0
+  } else {
+    openCard.value = openCard.value === n ? null : n
+  }
+}
+
+function toggleRecordings() {
+  if (openCard.value !== 3) {
+    openCard.value = 3
+    loadRecordings()
+  } else {
+    openCard.value = null
+  }
+}
+
+// ─── ═══════════════════════════════════════════════════════════════
+//  🎤 手机麦克风桥接（新增核心功能）
+//  架构：手机浏览器(MediaRecorder) → WebSocket → FFmpeg解码 → VB-Audio虚拟麦克风
+// ═══════════════════════════════════════════════════════════════════════
+
+const micBridgeActive = ref(false)
+const micBridgeConnecting = ref(false)
+const micMode = ref<'continuous' | 'push'>('continuous')  // continuous=长时模式，push=按住说话
+const micBridgeError = ref<string | null>(null)
+const micVolumeLevel = ref(0)
+const vmicStatus = ref<any>(null)
+
+// 用于在非 HTTPS 环境下强制使用麦克风（用户同意后生效）
+let _forceInsecureMode = false
+
+// 音频桥接 WebSocket
+let bridgeWs: WebSocket | null = null
+let bridgeMediaRecorder: MediaRecorder | null = null
+let bridgeAudioContext: AudioContext | null = null
+let bridgeAnalyser: AnalyserNode | null = null
+let bridgeLevelRaf: number | null = null
+let bridgeStream: MediaStream | null = null  // 保存 MediaStream 以便正确释放
+let _keepaliveTimer: ReturnType<typeof setInterval> | null = null  // 静音保活定时器
+let _wakeLock: WakeLockSentinel | null = null  // 屏幕常亮 Wake Lock
+let _audioSentCount = 0    // 本次连接发送的音频帧数
+let _vadSkippedCount = 0   // 本次连接跳过的静音帧数
+
+
+const bridgeStatusText = computed(() => {
+  if (micBridgeError.value) return `连接失败: ${micBridgeError.value}`
+  if (micBridgeConnecting.value) return '正在连接 WebSocket...'
+  if (micBridgeActive.value) {
+    return micMode.value === 'push' ? '正在收音...' : '手机麦克风已激活'
+  }
+  return micMode.value === 'push' ? '按住按钮开始说话' : '点击「开始」将手机变为电脑麦克风'
+})
+
+// 强制在非安全环境下尝试使用麦克风
+function forceInsecureMode() {
+  _forceInsecureMode = true
+  micBridgeError.value = null
+  startMicBridge()
+}
+
+// 打开证书引导页
+function openCertGuide() {
+  // setup 页面在 HTTP 7266 端口
+  // 使用相对路径，自动适配当前协议/端口
+  window.open('/setup', '_blank')
+}
+
+// ─── 统一按钮事件处理 ──────────────────────────────────────────────
+let _holdTimer: number | null = null
+let _holdStartTime = 0
+let _isHoldMode = false  // 标记是否已进入按住说话模式（timer 触发后置为 true）
+const HOLD_THRESHOLD = 300  // 按住超过300ms判定为按住说话模式
+const CLICK_THRESHOLD = 150  // 短于150ms判定为点击
+
+function onUnifiedBtnDown() {
+  _holdStartTime = Date.now()
+  _isHoldMode = false
+  
+  logger.debug('Button', `Down | connecting: ${micBridgeConnecting.value}, active: ${micBridgeActive.value}, mode: ${micMode.value}`)
+
+  // 如果正在连接中，不响应
+  if (micBridgeConnecting.value) return
+
+  // 如果麦克风已激活（长时模式运行中）：
+  // 按住超过阈值 → 切换为按住说话模式（不重新连接，只改模式标记）
+  // 短按松开 → 停止（在 onUnifiedBtnUp 判断）
+  if (micBridgeActive.value) {
+    if (micMode.value === 'continuous') {
+      // 长时模式激活中：按住超过阈值切为 push 标记（不断开连接）
+      logger.debug('Button', `Down | Entering hold mode (threshold=${HOLD_THRESHOLD}ms)`)
+      _holdTimer = window.setTimeout(() => {
+        _isHoldMode = true
+        micMode.value = 'push'
+        logger.info('Button', `Mode changed: continuous → push`)
+      }, HOLD_THRESHOLD)
+    }
+    // push 模式激活中：按住说话已经在录，不做额外处理
+    return
+  }
+
+  // 麦克风未激活时：
+  // 按住超过阈值 → push 模式启动
+  logger.debug('Button', `Down | Inactive, setting hold timer...`)
+  _holdTimer = window.setTimeout(() => {
+    _isHoldMode = true
+    micMode.value = 'push'
+    logger.info('Button', `Hold timer fired, starting mic (push mode)`)
+    startMicBridge()
+  }, HOLD_THRESHOLD)
+}
+
+function onUnifiedBtnUp() {
+  const holdDuration = Date.now() - _holdStartTime
+
+  if (_holdTimer) {
+    clearTimeout(_holdTimer)
+    _holdTimer = null
+  }
+
+  // 如果正在连接中，不响应
+  if (micBridgeConnecting.value) return
+
+  // 麦克风已激活时
+  if (micBridgeActive.value) {
+    if (micMode.value === 'push') {
+      // 按住说话模式：松手即停止
+      logger.info('Button', `Up | push mode, releasing → stop (hold=${holdDuration}ms)`)
+      stopMicBridge()
+    } else if (holdDuration < CLICK_THRESHOLD) {
+      // 长时模式：短按（点击）= 停止
+      logger.info('Button', `Up | continuous mode, short click → stop (hold=${holdDuration}ms)`)
+      stopMicBridge()
+    } else {
+      // 长时模式 + 按住超过 150ms 松开 = 不停止，保持连接
+      logger.debug('Button', `Up | continuous mode, long hold → keep (hold=${holdDuration}ms)`)
+    }
+    return
+  }
+
+  // 麦克风未激活时
+  if (!_isHoldMode && holdDuration < HOLD_THRESHOLD) {
+    // 短按（点击）= 长时模式启动
+    logger.info('Button', `Up | inactive, short click → start continuous (hold=${holdDuration}ms)`)
+    micMode.value = 'continuous'
+    startMicBridge()
+  }
+  // 按住超过阈值的情况，已经在 timer 中启动，_isHoldMode = true，这里不重复启动
+}
+
+function onUnifiedBtnLeave() {
+  const holdDuration = Date.now() - _holdStartTime
+  if (_holdTimer) {
+    clearTimeout(_holdTimer)
+    _holdTimer = null
+  }
+  // 如果是按住说话模式正在录音，鼠标移出也视为松手，停止录音
+  if (micBridgeActive.value && micMode.value === 'push') {
+    logger.info('Button', `Leave | push mode, mouse left → stop (hold=${holdDuration}ms)`)
+    stopMicBridge()
+  }
+}
+
+async function toggleMicBridge() {
+  // 防止重复调用
+  if (micBridgeActive.value || micBridgeConnecting.value) {
+    stopMicBridge()
+  } else {
+    await startMicBridge()
+  }
+}
+
+let _bridgeStarting = false  // 防止重复启动
+let _bridgeStopping = false  // 防止重复停止
+let _reconnectAttempts = 0   // 重连次数
+const MAX_RECONNECT = 3      // 最大重连次数
+
+// 按住说话模式：断开后自动重连
+function reconnectBridge() {
+  if (_reconnectAttempts >= MAX_RECONNECT) {
+    logger.warn('Bridge', `Reconnect limit reached (${MAX_RECONNECT}), stopping`)
+    _reconnectAttempts = 0
+    _bridgeStopping = true
+    stopMicBridge()
+    _bridgeStopping = false
+    micBridgeError.value = '连接意外中断，请重新按住按钮'
+    return
+  }
+  _reconnectAttempts++
+  logger.info('Bridge', `Attempting reconnect #${_reconnectAttempts}`)
+  
+  setTimeout(async () => {
+    if (micMode.value === 'push' && micBridgeActive.value === false) {
+      await startMicBridge()
+    }
+  }, 500)
+}
+
+async function startMicBridge() {
+  // 防止重复启动
+  if (_bridgeStarting) return
+  _bridgeStarting = true
+  _reconnectAttempts = 0  // 开始时重置重连计数
+  _audioSentCount = 0     // 重置音频发送计数
+  _vadSkippedCount = 0    // 重置静音跳过计数
+  
+  try {
+    micBridgeError.value = null
+    micBridgeConnecting.value = true
+    openCard.value = 0  // 展开卡片让用户看到状态
+
+    // 调试日志
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProto}//${window.location.host}/ws/audio/${props.deviceId}`
+    logger.info('Bridge', `════════════════════════════════════`)
+    logger.info('Bridge', `Starting mic bridge | wsUrl: ${wsUrl} | protocol: ${window.location.protocol}`)
+
+    // ──────────────────────────────────────────────────────────
+    // 🔌 第一步：先建立 WebSocket 连接
+    // 无论麦克风是否可用，先测试 WebSocket 是否能连接
+    // ──────────────────────────────────────────────────────────
+    bridgeWs = new WebSocket(wsUrl)
+    bridgeWs.binaryType = 'arraybuffer'
+
+    // WebSocket 超时（15秒）
+    const wsTimeout = setTimeout(() => {
+      if (micBridgeConnecting.value && bridgeWs?.readyState === WebSocket.CONNECTING) {
+        bridgeWs.close()
+        micBridgeError.value = 'WebSocket 连接超时，请确保电脑端 Voice Bridge 后台正在运行'
+        micBridgeConnecting.value = false
+        _bridgeStarting = false
+        logger.error('Bridge', 'WebSocket connection timeout')
+      }
+    }, 15000)
+
+    bridgeWs.onopen = () => {
+      clearTimeout(wsTimeout)
+      logger.info('Bridge', '✅ WebSocket connected')
+
+      // 发送 audio_start 信号
+      bridgeWs!.send(JSON.stringify({
+        type: 'audio_start',
+        format: 'pcm_int16',
+        sampleRate: 48000,
+        channels: 1
+      }))
+      logger.debug('Bridge', 'audio_start sent')
+
+      // ──────────────────────────────────────────────────────────
+      // ⏱️ 虚拟麦克风超时保护（8秒）
+      // 如果后端 FFmpeg/sounddevice 初始化失败，8秒后提示用户
+      // ──────────────────────────────────────────────────────────
+      const vmicTimeout = setTimeout(() => {
+        if (micBridgeConnecting.value && bridgeWs?.readyState === WebSocket.OPEN) {
+          micBridgeError.value = 'VMIC_INIT_TIMEOUT'
+          micBridgeConnecting.value = false
+          micBridgeActive.value = false
+          bridgeWs.close()
+          _bridgeStarting = false
+          logger.error('Bridge', '❌ VMIC init timeout — backend may have crashed')
+        }
+      }, 8000)
+
+      // 收到 vmic_status 时清除超时
+      const _origOnMessage = bridgeWs.onmessage
+      bridgeWs.onmessage = async (event) => {
+        clearTimeout(vmicTimeout)
+        await _origOnMessage?.call(bridgeWs, event)
+      }
+
+      // ──────────────────────────────────────────────────────────
+      // 🎤 第二步：获取麦克风权限
+      // WebSocket 连接成功后，再获取麦克风
+      // ──────────────────────────────────────────────────────────
+      initMicrophoneStream()
+    }
+
+    bridgeWs.onerror = () => {
+      clearTimeout(wsTimeout)
+      logger.error('Bridge', '❌ WebSocket error')
+      micBridgeError.value = 'WebSocket 连接失败，请确认：① 电脑端 Voice Bridge 已启动（选手机麦克风模式）② 手机已安装并信任证书 ③ 防火墙允许 7266 端口'
+      micBridgeConnecting.value = false
+      micBridgeActive.value = false
+      _bridgeStarting = false
+    }
+
+    bridgeWs.onclose = (event) => {
+      clearTimeout(wsTimeout)
+      logger.info('Bridge', `WebSocket closed: ${event.code} ${event.reason}`)
+      
+      // 检查是否是非正常断开（代码 1006 或非主动关闭）
+      const wasActive = micBridgeActive.value
+      const wasPushMode = micMode.value === 'push'
+      
+      // 重置连接状态
+      micBridgeConnecting.value = false
+      bridgeWs = null
+      
+      // 按住说话模式：断开后自动尝试重连（最多3次）
+      if (wasActive && wasPushMode && !_bridgeStopping) {
+        reconnectBridge()
+      } else {
+        // 停止麦克风并重置状态
+        if (micBridgeActive.value) {
+          stopMicBridge()
+        }
+        _bridgeStarting = false
+      }
+    }
+
+    bridgeWs.onmessage = async (event) => {
+      try {
+        const msg = typeof event.data === 'string'
+          ? JSON.parse(event.data)
+          : null
+
+        if (msg?.type === 'vmic_status') {
+          if (!msg.success) {
+            micBridgeError.value = msg.error || msg.message
+            stopMicBridge()
+          }
+        } else if (msg?.type === 'ack') {
+          logger.debug('Bridge', `Server ack: ${msg.action}`)
+        }
+      } catch {}
+    }
+
+  } catch (e: any) {
+    logger.error('Bridge', `Error: ${e.message}`, { stack: e.stack })
+    micBridgeError.value = e.message
+    micBridgeConnecting.value = false
+    _bridgeStarting = false
+  }
+}
+
+// 初始化麦克风和音频处理
+async function initMicrophoneStream() {
+  logger.info('Bridge', `Initializing microphone | mediaDevices: ${!!navigator.mediaDevices}`)
+
+  // 尝试获取 getUserMedia（兼容各种浏览器）
+  const getUserMedia = 
+    navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices) ||
+    (navigator as any).webkitGetUserMedia?.bind(navigator) ||
+    (navigator as any).mozGetUserMedia?.bind(navigator) ||
+    (navigator as any).msGetUserMedia?.bind(navigator)
+  
+  if (!getUserMedia) {
+    logger.warn('Bridge', '⚠️ getUserMedia not available — WebSocket connected but mic will not work')
+    // WebSocket 已经连接，可以保持活跃
+    micBridgeActive.value = true
+    micBridgeConnecting.value = false
+    activateWakeLock()
+    return
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // 🎤 获取麦克风权限
+  // ──────────────────────────────────────────────────────────
+  let stream: MediaStream
+  try {
+    stream = await getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1,
+      }
+    })
+  } catch (e: any) {
+    logger.error('Bridge', `❌ Microphone error: ${e.name} — ${e.message}`)
+    micBridgeConnecting.value = false
+    micBridgeActive.value = false
+    // 麦克风获取失败时，主动关闭 WebSocket，防止僵尸连接
+    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+      bridgeWs.close()
+    }
+    if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+      micBridgeError.value = 'MIC_PERMISSION_DENIED'
+    } else if (e.name === 'NotFoundError') {
+      micBridgeError.value = 'MIC_NOT_FOUND'
+    } else {
+      micBridgeError.value = `麦克风启动失败: ${e.message}`
+    }
+    return
+  }
+
+  bridgeStream = stream
+  logger.info('Bridge', '✅ Microphone permission granted')
+
+  // ──────────────────────────────────────────────────────────
+  // 🎯 使用 Web Audio API 直接获取 PCM 数据
+  // ──────────────────────────────────────────────────────────
+  const audioContext = new AudioContext({ sampleRate: 48000 })
+  bridgeAudioContext = audioContext
+
+  // 创建音频源
+  const sourceNode = audioContext.createMediaStreamSource(stream)
+
+  // 创建分析器（用于音量显示）
+  const analyser = audioContext.createAnalyser()
+  analyser.fftSize = 1024
+  sourceNode.connect(analyser)
+  bridgeAnalyser = analyser
+
+  // 创建 ScriptProcessorNode 获取 PCM 数据
+  // 缓冲区: 4096 samples ≈ 85ms @ 48kHz（必须是 2 的幂次方：256, 512, 1024, 2048, 4096）
+  const BUFFER_SIZE = 4096
+  const processor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1)
+  bridgeMediaRecorder = processor as any // 复用变量
+
+  // ⚠️ 关键：必须把 processor 连接到音频图，否则 onaudioprocess 永远不会被触发！
+  sourceNode.connect(processor)
+  processor.connect(audioContext.destination) // destination 不影响处理，但某些浏览器需要
+
+  // VAD 阈值 - 0.003 是更灵敏的值（0.01 太严格，会过滤掉正常说话声）
+  const VAD_THRESHOLD = 0.003
+  let _lastAudioTime = Date.now()
+  // _audioSentCount 和 _vadSkippedCount 已在模块级声明
+
+  // 计算 RMS 音量
+  function calculateRMS(buffer: Float32Array): number {
+    let sum = 0
+    for (let i = 0; i < buffer.length; i++) {
+      sum += buffer[i] * buffer[i]
+    }
+    return Math.sqrt(sum / buffer.length)
+  }
+
+  // Float32 → Int16Array
+  function float32ToInt16(float32: Float32Array): Int16Array {
+    const int16 = new Int16Array(float32.length)
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]))
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+    }
+    return int16
+  }
+
+  // 发送到后端
+  function sendAudioData(pcmData: Int16Array, label: string) {
+    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+      bridgeWs.send(pcmData)
+      _audioSentCount++
+      _lastAudioTime = Date.now()
+      // 每 50 次发送打印一次统计
+      if (_audioSentCount % 50 === 0) {
+        logger.debug('Bridge', `📊 Audio stats: sent=${_audioSentCount}, skipped=${_vadSkippedCount}`)
+      }
+    }
+  }
+
+  // 音频数据处理器
+  processor.onaudioprocess = (event: AudioProcessingEvent) => {
+    const inputBuffer = event.inputBuffer
+    const inputData = inputBuffer.getChannelData(0) // Float32Array
+
+    // 更新音量显示
+    const rms = calculateRMS(inputData)
+    micVolumeLevel.value = Math.min(100, rms * 500)
+
+    // VAD 检测：如果音量太低，跳过（但不关闭连接）
+    if (rms < VAD_THRESHOLD) {
+      _vadSkippedCount++
+      // 每 100 次跳过打印一次
+      if (_vadSkippedCount % 100 === 0) {
+        logger.debug('Bridge', `🔇 VAD skipped: rms=${rms.toFixed(4)} < ${VAD_THRESHOLD} (skipped=${_vadSkippedCount})`)
+      }
+      return
+    }
+
+    // 转换为 Int16 PCM 并发送
+    const pcmData = float32ToInt16(inputData)
+    sendAudioData(pcmData, `rms=${rms.toFixed(4)}`)
+  }
+
+  // 每 3 秒检查一次：如果 3 秒内没发送任何音频，发送一个静音块保持连接活跃
+  _keepaliveTimer = setInterval(() => {
+    const elapsed = (Date.now() - _lastAudioTime) / 1000
+    if (elapsed > 3 && bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+      // 发送一个静音块（4096 samples * 2 bytes = 8192 bytes）
+      const silence = new Int16Array(BUFFER_SIZE)
+      bridgeWs.send(silence)
+      logger.debug('Bridge', `🔕 Sent silence keepalive (elapsed=${elapsed.toFixed(1)}s)`)
+    }
+  }, 3000)
+
+  // 连接节点（不连接到 destination，避免回音）
+  sourceNode.connect(processor)
+
+  // 开始音量监控
+  updateBridgeLevel()
+
+  // 标记为活跃
+  micBridgeActive.value = true
+  micBridgeConnecting.value = false
+
+  // 激活屏幕常亮（防止息屏断开连接）
+  activateWakeLock()
+}
+
+// 屏幕常亮：防止手机息屏导致 WebSocket 断开
+async function activateWakeLock() {
+  if (_wakeLock) return  // 已经激活
+  if ('wakeLock' in navigator) {
+    try {
+      _wakeLock = await (navigator as any).wakeLock.request('screen')
+      logger.info('Bridge', '✅ Screen Wake Lock activated')
+    } catch (e) {
+      logger.warn('Bridge', `⚠️ Wake Lock failed: ${e}`)
+    }
+  }
+}
+
+async function releaseWakeLock() {
+  if (_wakeLock) {
+    try {
+      await _wakeLock.release()
+      logger.info('Bridge', '✅ Screen Wake Lock released')
+    } catch {}
+    _wakeLock = null
+  }
+}
+
+function updateBridgeLevel() {
+  if (!bridgeAnalyser) return
+  const data = new Uint8Array(bridgeAnalyser.frequencyBinCount)
+  bridgeAnalyser.getByteFrequencyData(data)
+  
+  // 计算峰值（而不是平均值），更能反映实际音量
+  const peak = Math.max(...data)
+  micVolumeLevel.value = Math.min(100, Math.round(peak * 100 / 255))
+  
+  bridgeLevelRaf = requestAnimationFrame(updateBridgeLevel)
+}
+
+function stopMicBridge() {
+  logger.info('Bridge', `stopMicBridge called | active=${micBridgeActive.value}, connecting=${micBridgeConnecting.value}`)
+  
+  _bridgeStopping = true  // 标记为主动停止
+
+  // 停止 ScriptProcessorNode
+  if (bridgeMediaRecorder) {
+    try {
+      (bridgeMediaRecorder as ScriptProcessorNode).disconnect()
+    } catch {}
+    bridgeMediaRecorder = null
+  }
+
+  // 停止 MediaStream 的所有轨道（关键！释放麦克风）
+  if (bridgeStream) {
+    bridgeStream.getTracks().forEach(track => track.stop())
+    logger.debug('Bridge', 'MediaStream tracks stopped')
+    bridgeStream = null
+  }
+
+  // 断开分析器
+  if (bridgeAnalyser) {
+    try {
+      bridgeAnalyser.disconnect()
+    } catch {}
+    bridgeAnalyser = null
+  }
+
+  // 关闭 AudioContext
+  if (bridgeAudioContext) {
+    try {
+      bridgeAudioContext.close()
+    } catch {}
+    bridgeAudioContext = null
+  }
+
+  if (bridgeLevelRaf) {
+    cancelAnimationFrame(bridgeLevelRaf)
+    bridgeLevelRaf = null
+  }
+
+  // 停止静音保活定时器
+  if (_keepaliveTimer) {
+    clearInterval(_keepaliveTimer)
+    _keepaliveTimer = null
+  }
+  
+  // 释放屏幕常亮
+  releaseWakeLock()
+  
+  micVolumeLevel.value = 0
+
+  // 发送停止消息并关闭 WebSocket
+  if (bridgeWs) {
+    try {
+      if (bridgeWs.readyState === WebSocket.OPEN) {
+        bridgeWs.send(JSON.stringify({ type: 'audio_stop', timestamp: Date.now() }))
+        logger.debug('Bridge', 'audio_stop sent')
+      }
+      bridgeWs.close()
+      logger.info('Bridge', 'WebSocket closed')
+    } catch (e) {
+      logger.warn('Bridge', `WebSocket close error: ${e}`)
+    }
+    bridgeWs = null
+  }
+
+  micBridgeActive.value = false
+  micBridgeConnecting.value = false
+  _bridgeStopping = false  // 重置停止标志
+  logger.info('Bridge', `stopMicBridge done | audioSent=${_audioSentCount}, vadSkipped=${_vadSkippedCount}`)
+}
+
+// ─── 录音模块（整合版）──────────────────────────────────────────────────
+const recordMode = ref<'tap' | 'hold'>('tap')  // 录音模式：tap=点击，hold=按住
+
+// ─── 原有功能（保持不变）─────────────────────────────────────────────────
+const isUploading  = ref(false)
+const isRecording  = ref(false)
+const isReceiving  = ref(false)
+const recordingDuration = ref(0)
+const volumeLevel  = ref(0)
+const lastUploadTime = ref<number | null>(null)
+const uploadCount  = ref(0)
+const error        = ref<string | null>(null)
+const httpsError   = ref(false)
+const micAvailable = ref(false)
+const playingId    = ref<string | null>(null)
+const recordings   = ref<any[]>([])
+
+const fileInput     = ref<HTMLInputElement | null>(null)
+let mediaRecorder:  MediaRecorder | null = null
+let audioChunks:    Blob[] = []
+let durationTimer:  number | null = null
+let audioContext:   AudioContext | null = null
+let analyser:       AnalyserNode | null = null
+let levelAnimFrame: number | null = null
+let receiveInterval: number | null = null
+let lastReceivedId  = ''
+const audioPlayer   = new Audio()
+
+audioPlayer.addEventListener('ended', () => { playingId.value = null })
+audioPlayer.addEventListener('error', () => { playingId.value = null })
+
+function getBaseUrl(): string {
+  return `${window.location.protocol}//${window.location.host}`
+}
+
+function formatDuration(s: number): string {
+  const m = Math.floor(s / 60)
+  return `${m}:${String(s % 60).padStart(2, '0')}`
+}
+
+function formatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+function shortId(id: string): string {
+  return id.length > 8 ? id.slice(-6) : id
+}
+
+onMounted(() => {
+  if (navigator.mediaDevices?.getUserMedia) {
+    micAvailable.value = true
+  }
+  wsConnect()
+})
+
+watch(lastMessage, (msg) => {
+  if (!msg) return
+  if ((msg as any).type === 'new_audio') {
+    const m = msg as any
+    loadRecordings()
+    if (isReceiving.value) {
+      playingId.value = m.audio_id
+      audioPlayer.src = `${getBaseUrl()}${m.audio_url}`
+      audioPlayer.play().catch(() => { playingId.value = null })
+    }
+  }
+})
+
+async function onFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file  = input.files?.[0]
+  if (!file) return
+  input.value = ''
+  await uploadAudioFile(file)
+}
+
+async function startLiveRecording() {
+  if (isRecording.value || isUploading.value) return
+  error.value = null
+  audioChunks = []
+
+  try {
+    const bitrate = 32000
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    })
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm' : 'audio/mp4'
+
+    mediaRecorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: bitrate })
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data) }
+
+    mediaRecorder.onstop = async () => {
+      isUploading.value = true
+      try {
+        // 创建音频上下文用于解码
+        const audioCtx = new AudioContext()
+        const blob = new Blob(audioChunks, { type: mimeType })
+        const arrayBuffer = await blob.arrayBuffer()
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+        
+        // 转换为 PCM 数据
+        const pcmData = audioBufferToPcm(audioBuffer)
+        
+        // 优先通过麦克风桥接发送（如已连接）
+        if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+          bridgeWs.send(pcmData)
+          uploadCount.value++
+          lastUploadTime.value = Date.now()
+        } else {
+          // 否则上传到服务器
+          const file = new File([blob], `rec_${Date.now()}.webm`, { type: mimeType })
+          await uploadAudioFile(file)
+        }
+        
+        await audioCtx.close()
+      } catch { error.value = '发送失败，请重试' }
+      isUploading.value = false
+      audioChunks = []
+      stream.getTracks().forEach(t => t.stop())
+    }
+
+    mediaRecorder.start()
+    isRecording.value = true
+    recordingDuration.value = 0
+    durationTimer = window.setInterval(() => { recordingDuration.value++ }, 1000)
+    setupVolume(stream)
+
+  } catch (e: any) {
+    httpsError.value = true
+    error.value = e.name === 'NotAllowedError'  ? '麦克风权限被拒绝'
+                : e.name === 'NotFoundError'    ? '未找到麦克风'
+                : `录音失败（${e.message}）`
+  }
+}
+
+function stopLiveRecording() {
+  if (!isRecording.value || !mediaRecorder) return
+  if (levelAnimFrame) { cancelAnimationFrame(levelAnimFrame); levelAnimFrame = null }
+  if (durationTimer)  { clearInterval(durationTimer); durationTimer = null }
+  mediaRecorder.stop()
+  isRecording.value = false
+  volumeLevel.value = 0
+  audioContext?.close()
+  audioContext = null
+}
+
+function setupVolume(stream: MediaStream) {
+  audioContext = new AudioContext()
+  analyser     = audioContext.createAnalyser()
+  analyser.fftSize = 256
+  audioContext.createMediaStreamSource(stream).connect(analyser)
+  const data = new Uint8Array(analyser.frequencyBinCount)
+  const tick = () => {
+    if (!analyser || !isRecording.value) return
+    analyser.getByteFrequencyData(data)
+    volumeLevel.value = Math.min(100, Math.round(data.reduce((a, b) => a + b, 0) / data.length * 100 / 255))
+    levelAnimFrame = requestAnimationFrame(tick)
+  }
+  tick()
+}
+
+// 将 AudioBuffer 转换为 Int16Array PCM 数据（48kHz, mono）
+function audioBufferToPcm(audioBuffer: AudioBuffer): Int16Array {
+  const sampleRate = audioBuffer.sampleRate
+  const numChannels = audioBuffer.numberOfChannels
+  const length = audioBuffer.length
+  
+  // 合并所有声道为单声道（如需要）
+  let channelData: Float32Array
+  if (numChannels === 1) {
+    channelData = audioBuffer.getChannelData(0)
+  } else {
+    // 平均多声道
+    channelData = new Float32Array(length)
+    for (let ch = 0; ch < numChannels; ch++) {
+      const data = audioBuffer.getChannelData(ch)
+      for (let i = 0; i < length; i++) {
+        channelData[i] += data[i] / numChannels
+      }
+    }
+  }
+  
+  // 重新采样到 48kHz（如需要）
+  let finalData: Float32Array
+  if (sampleRate !== 48000) {
+    const ratio = 48000 / sampleRate
+    const newLength = Math.floor(length * ratio)
+    finalData = new Float32Array(newLength)
+    for (let i = 0; i < newLength; i++) {
+      const srcIndex = i / ratio
+      const srcIndexFloor = Math.floor(srcIndex)
+      const srcIndexCeil = Math.min(srcIndexFloor + 1, length - 1)
+      const t = srcIndex - srcIndexFloor
+      finalData[i] = channelData[srcIndexFloor] * (1 - t) + channelData[srcIndexCeil] * t
+    }
+  } else {
+    finalData = channelData
+  }
+  
+  // 转换为 Int16
+  const pcmData = new Int16Array(finalData.length)
+  for (let i = 0; i < finalData.length; i++) {
+    const s = Math.max(-1, Math.min(1, finalData[i]))
+    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+  }
+  
+  return pcmData
+}
+
+async function uploadAudioFile(file: File) {
+  isUploading.value = true
+  error.value = null
+
+  try {
+    const form = new FormData()
+    form.append('audio', file, file.name)
+    form.append('device_id', props.deviceId)
+
+    const res = await fetch(`${getBaseUrl()}/api/audio/upload`, { method: 'POST', body: form })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+    const data = await res.json()
+    uploadCount.value++
+    lastUploadTime.value = Date.now()
+    await loadRecordings()
+
+  } catch (e: any) {
+    error.value = `上传失败：${e.message}`
+  } finally {
+    isUploading.value = false
+  }
+}
+
+async function loadRecordings() {
+  try {
+    const res = await fetch(`${getBaseUrl()}/api/audio/list?limit=50&offset=0`)
+    if (!res.ok) return
+    const data = await res.json()
+    recordings.value = data.items || []
+  } catch {}
+}
+
+function playAudio(rec: any) {
+  if (playingId.value === rec.audio_id) {
+    audioPlayer.pause()
+    playingId.value = null
+    return
+  }
+  playingId.value = rec.audio_id
+  const audioUrl = `${getBaseUrl()}${rec.audio_url}`
+  logger.info('Audio', `Playing: ${audioUrl} | audio_id: ${rec.audio_id}`)
+  audioPlayer.src = audioUrl
+  audioPlayer.play().catch((e) => { 
+    logger.error('Audio', `Play error: ${e}`)
+    playingId.value = null 
+  })
+}
+
+async function deleteRecording(audioId: string) {
+  try {
+    await fetch(`${getBaseUrl()}/api/audio/recording/${audioId}`, { method: 'DELETE' })
+    recordings.value = recordings.value.filter(r => r.audio_id !== audioId)
+    if (playingId.value === audioId) {
+      audioPlayer.pause()
+      playingId.value = null
+    }
+  } catch {}
+}
+
+async function clearAllRecordings() {
+  if (!confirm('确定清空所有录音？')) return
+  try {
+    await fetch(`${getBaseUrl()}/api/audio/all`, { method: 'DELETE' })
+    recordings.value = []
+    audioPlayer.pause()
+    playingId.value = null
+  } catch {}
+}
+
+function toggleReceive() {
+  isReceiving.value = !isReceiving.value
+  if (!isReceiving.value) {
+    if (receiveInterval) { clearInterval(receiveInterval); receiveInterval = null }
+    audioPlayer.pause()
+    playingId.value = null
+  } else {
+    if (!wsConnected.value) {
+      receiveInterval = window.setInterval(pollLatest, 1500)
+    }
+  }
+}
+
+async function pollLatest() {
+  try {
+    const res = await fetch(`${getBaseUrl()}/api/audio/latest?id=${lastReceivedId}`)
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.has_new && data.audio_id !== lastReceivedId) {
+      lastReceivedId = data.audio_id
+      loadRecordings()
+      playingId.value = data.audio_id
+      audioPlayer.src = `${getBaseUrl()}${data.audio_url}`
+      audioPlayer.play().catch(() => { playingId.value = null })
+    }
+  } catch {}
+}
+
+onUnmounted(() => {
+  stopMicBridge()
+  stopLiveRecording()
+  if (receiveInterval) clearInterval(receiveInterval)
+  wsDisconnect()
+  audioPlayer.pause()
+})
+</script>
+
+<style scoped>
+/* ═══════════════════════════════════════════
+   整体容器
+═══════════════════════════════════════════ */
+.mic-wrap {
+  margin: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ═══════════════════════════════════════════
+   卡片
+═══════════════════════════════════════════ */
+.mic-card {
+  border: 1.5px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.mic-card.expanded {
+  border-color: #818cf8;
+  box-shadow: 0 2px 12px rgba(129, 140, 248, 0.13);
+}
+
+/* ─── HTTP 模式警告 ─── */
+.http-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  color: #92400e;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+}
+
+.http-warning:hover {
+  background: linear-gradient(135deg, #fde68a 0%, #fcd34d 100%);
+}
+
+.http-warning-link {
+  color: #b45309;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ─── Bridge 卡片（激活时高亮） ─── */
+.bridge-card {
+  border-color: #c7d2fe;
+  background: linear-gradient(135deg, #eef2ff 0%, #fff 100%);
+}
+
+.bridge-card.active {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12), 0 4px 16px rgba(99, 102, 241, 0.15);
+}
+
+/* ─── Header ─── */
+.mic-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 16px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+  background: #fafafa;
+  position: relative;
+  z-index: 10;
+}
+
+.mic-card-header:hover { background: #f3f4f6; }
+
+.mic-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.mic-icon { font-size: 18px; }
+
+.mic-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.mic-badge.green { background: #dcfce7; color: #16a34a; }
+.mic-badge.blue  { background: #dbeafe; color: #1d4ed8; }
+.mic-badge.gray  { background: #f3f4f6; color: #9ca3af; }
+
+.mic-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.meta-tag.red { background: #fee2e2; color: #b91c1c; }
+
+.live-dot {
+  background: #fee2e2;
+  color: #b91c1c;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.chevron {
+  font-size: 20px;
+  color: #9ca3af;
+  transition: transform 0.25s cubic-bezier(.4,0,.2,1);
+  line-height: 1;
+  display: inline-block;
+}
+
+.chevron.open { transform: rotate(90deg); }
+
+/* ─── Body ─── */
+.mic-card-body {
+  padding: 16px;
+  border-top: 1px solid #f0f0f0;
+  background: #fff;
+}
+
+/* ═══════════════════════════════════════════
+   🎤 手机麦克风桥接 UI
+═══════════════════════════════════════════ */
+.bridge-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.bridge-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+/* 状态指示灯 */
+.status-indicator {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #e5e7eb;
+  transition: background 0.3s;
+}
+
+.status-indicator.active {
+  background: #dcfce7;
+}
+
+.status-indicator.connecting {
+  background: #fef3c7;
+}
+
+.status-indicator.error {
+  background: #fee2e2;
+}
+
+.status-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  transition: border-color 0.3s;
+}
+
+.status-indicator.active .status-ring {
+  border-color: #16a34a;
+  animation: ring-pulse 1.5s ease-in-out infinite;
+}
+
+.status-indicator.connecting .status-ring {
+  border-color: #d97706;
+  animation: ring-pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes ring-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.15); opacity: 0.7; }
+}
+
+.status-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #9ca3af;
+  transition: background 0.3s;
+}
+
+.status-indicator.active .status-dot { background: #16a34a; }
+.status-indicator.connecting .status-dot { background: #d97706; }
+.status-indicator.error .status-dot { background: #ef4444; }
+
+.status-text {
+  flex: 1;
+}
+
+.status-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.status-sub {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 3px;
+}
+
+.vmic-warning {
+  color: #b91c1c;
+  font-size: 11px;
+}
+
+/* 电平条 */
+.bridge-levels {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.level-bar {
+  flex: 1;
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.level-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80, #22c55e);
+  border-radius: 4px;
+  transition: width 0.1s ease-out;
+  min-width: 2%;
+}
+
+.level-label {
+  font-size: 11px;
+  color: #6b7280;
+  width: 32px;
+  text-align: right;
+}
+
+/* 操作按钮 */
+.bridge-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.bridge-btn {
+  padding: 12px 36px;
+  border-radius: 28px;
+  border: 2px solid #818cf8;
+  background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+  color: white;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 160px;
+}
+
+.bridge-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  border-color: #4f46e5;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+}
+
+.bridge-btn.active {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  border-color: #ef4444;
+}
+
+.bridge-btn.active:hover {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  border-color: #dc2626;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+}
+
+.bridge-btn.connecting {
+  background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+  border-color: #d97706;
+  cursor: not-allowed;
+}
+
+.bridge-btn.push-mode {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: #10b981;
+}
+
+.bridge-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+/* 提示框 */
+.bridge-tip-box {
+  margin-top: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+}
+
+.tip-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.tip-item {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.8;
+}
+
+.tip-link {
+  display: inline-block;
+  margin-left: 8px;
+  color: #3b82f6;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tip-link:hover {
+  color: #1d4ed8;
+}
+
+/* 警告项样式 */
+.warning-item {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.warning-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.warning-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.warning-buttons .tip-link {
+  flex: 1;
+  text-align: center;
+}
+
+.warning-icon {
+  font-size: 14px;
+}
+
+.warning-text {
+  font-size: 12px;
+  color: #92400e;
+  font-weight: 500;
+}
+
+/* 模式切换按钮组 */
+.mode-switch,
+.bridge-mode-switch {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.mode-btn {
+  padding: 6px 14px;
+  border-radius: 16px;
+  border: 1.5px solid #e5e7eb;
+  background: #fff;
+  font-size: 12px;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.mode-btn.active {
+  border-color: #818cf8;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.mode-btn:hover:not(.active) {
+  border-color: #d1d5db;
+  background: #f9fafb;
+}
+
+.mode-desc {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* 录音模块 */
+.record-btn-area {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.rec-big-btn {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.35);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.rec-big-btn:active {
+  transform: scale(0.92);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+}
+
+.rec-big-btn.uploading {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rec-icon {
+  font-size: 32px;
+}
+
+.rec-hint {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+/* 统一录音按钮样式 */
+.record-unified-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0 4px;
+}
+
+.rec-unified-btn {
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.35);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, background 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.rec-unified-btn:active,
+.rec-unified-btn.recording {
+  transform: scale(0.92);
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+}
+
+.rec-unified-btn.uploading {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* 按住说话按钮样式 */
+.push-btn {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: #10b981;
+  min-width: 140px;
+}
+
+.push-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  border-color: #059669;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.push-btn.active {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  border-color: #ef4444;
+}
+
+.push-btn.active:hover {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  border-color: #dc2626;
+}
+
+.unified-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #9ca3af;
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════
+   通用提示条
+═══════════════════════════════════════════ */
+.success-bar {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #dcfce7;
+  color: #166534;
+  border-radius: 8px;
+  font-size: 13px;
+  text-align: center;
+}
+
+.error-bar {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  font-size: 13px;
+  text-align: center;
+}
+
+.error-sub {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-top: 4px;
+  display: block;
+}
+
+/* ═══════════════════════════════════════════
+   原有卡片样式
+═══════════════════════════════════════════ */
+.insecure-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.insecure-hint {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.btn-warning {
+  background: linear-gradient(135deg, #ff9800, #f57c00);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-warning:hover {
+  background: linear-gradient(135deg, #ffa726, #fb8c00);
+  transform: scale(1.05);
+}
+
+/* ════════════════════════════════════════════
+   原有卡片样式
+═══════════════════════════════════════════ */
+.record-tap-area {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.tap-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.tap-label.uploading { opacity: 0.6; pointer-events: none; }
+
+.tap-btn {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.35);
+  cursor: pointer;
+}
+
+.tap-btn:active,
+.tap-label:active .tap-btn { transform: scale(0.92); box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2); }
+
+.tap-hint {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.spinner-icon {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hold-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.hold-btn {
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  border: 2.5px solid #818cf8;
+  background: transparent;
+  color: #4338ca;
+  font-size: 28px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hold-btn:active,
+.hold-btn.recording {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: white;
+  transform: scale(0.95);
+}
+
+.hold-hint { font-size: 13px; color: #6b7280; }
+
+.volume-bar {
+  width: 100%;
+  max-width: 200px;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.volume-level {
+  height: 100%;
+  background: #4ade80;
+  border-radius: 3px;
+  transition: width 0.08s;
+}
+
+.receive-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.receive-label {
+  flex: 1;
+  font-size: 13px;
+  color: #374151;
+}
+
+.receive-toggle {
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1.5px solid #d1d5db;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: #6b7280;
+}
+
+.receive-toggle.active {
+  background: #dbeafe;
+  border-color: #3b82f6;
+  color: #1d4ed8;
+}
+
+.ws-status { font-size: 11px; font-weight: 600; }
+.ws-status.live { color: #16a34a; }
+.ws-status.poll { color: #d97706; }
+
+.empty-tip {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 13px;
+  padding: 20px 0;
+}
+
+.rec-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.rec-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.rec-item:hover { background: #f3f4f6; }
+.rec-item.playing { border-color: #818cf8; background: #eef2ff; }
+
+.rec-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rec-time { font-size: 12px; color: #6b7280; white-space: nowrap; }
+
+.rec-size {
+  font-size: 11px;
+  color: #9ca3af;
+  background: #f3f4f6;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.rec-device {
+  font-size: 11px;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.rec-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.rec-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.rec-btn.play:hover { background: #eef2ff; border-color: #818cf8; }
+.rec-btn.play.active { background: #818cf8; color: white; border-color: #818cf8; }
+.rec-btn.del:hover { background: #fee2e2; border-color: #ef4444; }
+
+.rec-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f3f4f6;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: #3b82f6;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.link-btn:hover { background: #eff6ff; }
+.link-btn.danger { color: #ef4444; }
+.link-btn.danger:hover { background: #fef2f2; }
+</style>

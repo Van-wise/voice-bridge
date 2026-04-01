@@ -1,0 +1,636 @@
+# -*- coding: utf-8 -*-
+"""
+Voice Bridge 启动器
+负责：环境检测 → 缺失提示 → 自动安装 → 启动服务
+"""
+
+import os
+import sys
+import time
+import socket
+import subprocess
+import shutil
+from pathlib import Path
+
+# 项目路径
+ROOT = Path(__file__).parent.parent
+BACKEND = Path(__file__).parent
+FRONTEND = ROOT / "frontend"
+CERT_DIR = BACKEND / "certs"
+
+# 颜色定义（Windows 兼容）
+class Colors:
+    # Windows 10+ 支持 ANSI，但需要启用
+    _enabled = False
+
+    @classmethod
+    def _init(cls):
+        if os.name == 'nt':
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+                cls._enabled = True
+            except:
+                cls._enabled = False
+        else:
+            cls._enabled = True
+
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+
+    @classmethod
+    def print(cls, msg, color=""):
+        # 预先替换 Unicode 符号，避免 GBK 终端编码错误
+        UNICODE_REPLACEMENTS = {
+            '\u2713': '[OK]', '\u2717': '[X]', '\u25b6': '>', '\u25c7': '*',
+            '\u2022': '*', '\u2502': '|', '\u2500': '-', '\u251c': '+', '\u2514': '+',
+        }
+        safe_msg = msg
+        for old, new in UNICODE_REPLACEMENTS.items():
+            safe_msg = safe_msg.replace(old, new)
+        # 再去除残留的 ANSI 颜色代码（保留用于彩色输出）
+        plain_msg = strip_ansi(safe_msg)
+
+        try:
+            if cls._enabled and color:
+                print(f"{color}{plain_msg}{cls.ENDC}")
+            else:
+                print(plain_msg)
+        except UnicodeEncodeError:
+            # 万全之策：ASCII-only 替换
+            ascii_msg = plain_msg
+            for old, new in UNICODE_REPLACEMENTS.items():
+                ascii_msg = ascii_msg.replace(old, new)
+            if cls._enabled and color:
+                print(f"{color}{ascii_msg}{cls.ENDC}")
+            else:
+                print(ascii_msg)
+
+# 初始化颜色
+Colors._init()
+
+
+def print_banner():
+    print()
+    print("=" * 50)
+    print("         Voice Bridge 启动器")
+    print("=" * 50)
+    print()
+
+
+def get_local_ip():
+    """获取本机局域网IP"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return '127.0.0.1'
+
+
+def check_python():
+    """检测 Python 环境"""
+    print("[1/7] 检测 Python 环境...")
+
+    version = sys.version_info
+    if version.major < 3 or (version.major == 3 and version.minor < 8):
+        Colors.print(f"  [✗] Python 版本过低: {version.major}.{version.minor}.{version.micro}", Colors.FAIL)
+        Colors.print("  [i] 需要 Python 3.8+", Colors.WARNING)
+        return False
+
+    Colors.print(f"  [✓] Python {version.major}.{version.minor}.{version.micro}", Colors.OKGREEN)
+    return True
+
+
+def check_and_install_pip_packages():
+    """检测并安装 pip 包"""
+    print()
+    print("[2/7] 检测 Python 依赖...")
+
+    # 核心依赖（必须）
+    required = [
+        'fastapi',
+        'uvicorn[standard]',
+        'pydantic',
+        'pydantic-settings',
+        'websockets',
+        'pyperclip',
+        'sounddevice',
+        'numpy',
+    ]
+
+    # 可选依赖（缺少会降级功能）
+    optional = [
+        'pyautogui',
+        'cryptography',
+    ]
+
+    missing_required = []
+    missing_optional = []
+
+    for pkg in required:
+        name = pkg.split('[')[0].lower()
+        try:
+            __import__(name)
+        except ImportError:
+            missing_required.append(pkg)
+
+    for pkg in optional:
+        name = pkg.split('[')[0].lower()
+        try:
+            __import__(name)
+        except ImportError:
+            missing_optional.append(pkg)
+
+    # 安装缺失的核心依赖
+    if missing_required:
+        Colors.print(f"  [!] 缺少核心依赖: {', '.join(missing_required)}", Colors.WARNING)
+        Colors.print("  [i] 正在安装...", Colors.OKBLUE)
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install'] + missing_required,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                Colors.print(f"  [!] pip 输出: {result.stdout[-200:] if result.stdout else ''}", Colors.WARNING)
+                Colors.print(f"  [!] pip 错误: {result.stderr[-200:] if result.stderr else ''}", Colors.WARNING)
+            Colors.print("  [✓] 核心依赖安装完成", Colors.OKGREEN)
+        except Exception as e:
+            Colors.print(f"  [✗] 安装失败: {e}", Colors.FAIL)
+            return False
+
+    # 安装缺失的可选依赖
+    if missing_optional:
+        Colors.print(f"  [!] 缺少可选依赖: {', '.join(missing_optional)}", Colors.WARNING)
+        Colors.print("  [i] 自动粘贴功能需要这些依赖，是否安装？(Y/n)", Colors.OKBLUE)
+        response = input("  > ").strip().lower()
+        if response != 'n':
+            try:
+                result = subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install'] + missing_optional,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    Colors.print(f"  [!] pip 错误: {result.stderr[-200:] if result.stderr else ''}", Colors.WARNING)
+                Colors.print("  [✓] 可选依赖安装完成", Colors.OKGREEN)
+            except Exception as e:
+                Colors.print(f"  [✗] 安装失败，自动粘贴功能将不可用", Colors.WARNING)
+
+    if not missing_required and not missing_optional:
+        Colors.print("  [✓] 所有依赖已安装", Colors.OKGREEN)
+
+    return True
+
+
+def find_command(cmd):
+    """查找命令路径，Windows 兼容"""
+    import shutil
+    # 先尝试直接调用
+    result = shutil.which(cmd)
+    if result:
+        return result
+    # Windows 上可能需要加 .cmd 或 .exe
+    for ext in ['.cmd', '.exe', '.bat']:
+        result = shutil.which(cmd + ext)
+        if result:
+            return result
+    return cmd
+
+
+def check_node():
+    """检测 Node.js 环境"""
+    print()
+    print("[3/7] 检测 Node.js 环境...")
+
+    node_cmd = find_command('node')
+    try:
+        result = subprocess.run([node_cmd, '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            Colors.print(f"  [✓] Node.js {result.stdout.strip()}", Colors.OKGREEN)
+            return True
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    Colors.print("  [✗] Node.js 未安装", Colors.FAIL)
+    Colors.print("  [i] 下载地址: https://nodejs.org/", Colors.OKBLUE)
+    Colors.print("  [i] 安装后重新运行此脚本", Colors.OKBLUE)
+    return False
+
+
+def check_npm_packages():
+    """检测并安装 npm 包"""
+    print()
+    print("[4/7] 检测前端依赖...")
+
+    node_modules = FRONTEND / "node_modules"
+    package_json = FRONTEND / "package.json"
+
+    if not package_json.exists():
+        Colors.print("  [✗] package.json 不存在", Colors.FAIL)
+        return False
+
+    # 检查 vite 是否真正安装（不能只看 node_modules 目录是否存在）
+    vite_installed = (node_modules / "vite").exists()
+    if not vite_installed:
+        Colors.print("  [!] node_modules 不存在或为空，正在安装...", Colors.WARNING)
+
+        # Windows npm spawn EINVAL 临时修复：先删除残留的空目录
+        if node_modules.exists():
+            import shutil
+            try:
+                shutil.rmtree(str(node_modules))
+                Colors.print("  [i] 已清理残留的 node_modules", Colors.OKBLUE)
+            except Exception as e:
+                Colors.print(f"  [!] 清理 node_modules 失败: {e}", Colors.WARNING)
+
+        npm_cmd = find_command('npm')
+        try:
+            result = subprocess.run(
+                [npm_cmd, 'install', '--no-audit', '--no-fund', '--ignore-scripts'],
+                cwd=str(FRONTEND),
+                capture_output=True,
+                text=True,
+                shell=True  # Windows 需要 shell=True
+            )
+            if result.returncode != 0:
+                out = strip_ansi(result.stdout[-300:]) if result.stdout else ''
+                err = strip_ansi(result.stderr[-300:]) if result.stderr else ''
+                Colors.print(f"  [!] npm 输出: {out}", Colors.WARNING)
+                Colors.print(f"  [!] npm 错误: {err}", Colors.WARNING)
+                Colors.print("  [!] npm install 失败，请检查上方错误", Colors.FAIL)
+                return False
+            # 再次验证 vite 是否真的装上了
+            if not (node_modules / "vite").exists():
+                Colors.print("  [!] vite 未安装成功", Colors.FAIL)
+                return False
+            Colors.print("  [✓] 依赖安装完成", Colors.OKGREEN)
+        except Exception as e:
+            Colors.print(f"  [✗] npm install 失败: {e}", Colors.FAIL)
+            return False
+    else:
+        Colors.print("  [✓] node_modules 已存在", Colors.OKGREEN)
+
+    return True
+
+
+def check_ffmpeg():
+    """检测 FFmpeg"""
+    print()
+    print("[5/7] 检测 FFmpeg...")
+
+    ffmpeg_cmd = find_command('ffmpeg')
+    # 尝试系统 ffmpeg
+    try:
+        result = subprocess.run(
+            [ffmpeg_cmd, '-version'],
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        if result.returncode == 0:
+            Colors.print("  [✓] FFmpeg 已安装 (系统)", Colors.OKGREEN)
+            return True
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    # 尝试项目目录的 ffmpeg
+    ffmpeg_project = ROOT / "ffmpeg_bin" / "ffmpeg.exe"
+    if ffmpeg_project.exists():
+        Colors.print("  [✓] FFmpeg 已安装 (项目目录)", Colors.OKGREEN)
+        return True
+
+    Colors.print("  [!] FFmpeg 未安装", Colors.WARNING)
+    Colors.print("  [i] 虚拟麦克风功能需要 FFmpeg", Colors.OKBLUE)
+    Colors.print("  [i] 下载地址: https://ffmpeg.org/download.html", Colors.OKBLUE)
+    Colors.print("  [i] 或安装 VB-Audio Virtual Cable (包含解码器)", Colors.OKBLUE)
+
+    # 检查 VB-Audio 是否安装
+    vbaudio_path = Path("C:/Program Files/VB-Audio/VB-Audio Cable A")
+    if vbaudio_path.exists():
+        Colors.print("  [✓] VB-Audio Virtual Cable 已安装", Colors.OKGREEN)
+        Colors.print("  [i] FFmpeg 非必须，但建议安装以获得更好体验", Colors.OKBLUE)
+        return True
+
+    return False
+
+
+def run_with_live_output(cmd, cwd, timeout=120):
+    """
+    在 Windows 上运行命令，实时流式输出 stdout/stderr。
+    cmd: 完整命令字符串，如 'node node_modules/vite/bin/vite.js build'
+    解决了 npm run build 无法在 subprocess 中捕获子进程输出的问题。
+    """
+    import subprocess
+
+    # Windows: 使用 shell=True + 完整命令字符串，让 cmd.exe 正确处理
+    process = subprocess.Popen(
+        cmd,                           # 完整字符串，如 'node vite.js build'
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding='utf-8',
+        errors='replace',
+        shell=True,
+    )
+
+    output_lines = []
+    # 实时读取并输出每一行
+    for line in process.stdout:
+        line = line.rstrip('\r\n')
+        output_lines.append(line)
+        # 打印构建进度行（去掉 ANSI 颜色代码）
+        clean = strip_ansi(line)
+        if clean.strip():
+            print(f"  {clean}")
+
+    process.wait()
+    return process.returncode, '\n'.join(output_lines)
+
+
+def strip_ansi(text):
+    """去除 ANSI 颜色代码"""
+    import re
+    ansi_escape = re.compile(r'\x1B\[[0-9;]*m')
+    result = ansi_escape.sub('', text)
+    # 替换 vite 输出的 Unicode 符号为 ASCII，避免 GBK 终端报错
+    replacements = {
+        '\u2713': '[OK]',  # ✓
+        '\u2717': '[X]',   # ✗
+        '\u25b6': '>',     # ▶
+        '\u25c7': '*',     # ◇
+        '\u2022': '*',     # •
+        '\u2502': '|',     # │
+        '\u2500': '-',     # ─
+        '\u251c': '+',     # ├
+        '\u2514': '+',     # └
+    }
+    for old, new in replacements.items():
+        result = result.replace(old, new)
+    return result
+
+
+def check_and_build_frontend():
+    """检测并构建前端"""
+    print()
+    print("[6/7] 检测前端构建...")
+
+    dist_index = FRONTEND / "dist" / "index.html"
+
+    if dist_index.exists():
+        Colors.print("  [✓] 前端已构建", Colors.OKGREEN)
+        return True
+
+    Colors.print("  [!] 前端未构建，正在构建...", Colors.WARNING)
+
+    # 使用 node 直接运行 vite.js（绕过 npm run build 子进程输出丢失问题）
+    vite_bin = FRONTEND / "node_modules" / "vite" / "bin" / "vite.js"
+    if not vite_bin.exists():
+        Colors.print("  [!] vite 未安装，请先运行 npm install", Colors.FAIL)
+        return False
+
+    try:
+        returncode, _ = run_with_live_output(
+            f'node "{vite_bin}" build',  # 字符串形式，Windows shell=True 最佳实践
+            cwd=FRONTEND,
+            timeout=120
+        )
+
+        if returncode != 0:
+            Colors.print("  [!] 前端构建失败（进程异常退出）", Colors.FAIL)
+            return False
+
+        # 验证 dist/index.html 是否真的生成了
+        if not dist_index.exists():
+            Colors.print("  [!] dist/index.html 未生成（构建可能被中断）", Colors.FAIL)
+            return False
+
+        Colors.print("  [✓] 前端构建完成", Colors.OKGREEN)
+        return True
+
+    except Exception as e:
+        Colors.print(f"  [✗] 前端构建失败: {e}", Colors.FAIL)
+        return False
+
+
+def check_certificate():
+    """检测并生成证书"""
+    print()
+    print("[7/7] 检测 HTTPS 证书...")
+
+    cert_file = CERT_DIR / "server.crt"
+    key_file = CERT_DIR / "server.key"
+
+    if cert_file.exists() and key_file.exists():
+        Colors.print("  [✓] 证书已存在", Colors.OKGREEN)
+        return True
+
+    Colors.print("  [!] 证书不存在，正在生成...", Colors.WARNING)
+
+    generate_cert = BACKEND / "generate_cert.py"
+    if not generate_cert.exists():
+        Colors.print("  [✗] generate_cert.py 不存在", Colors.FAIL)
+        return False
+
+    try:
+        # 检查 cryptography 是否可用
+        try:
+            from cryptography import x509
+            use_crypto = True
+        except ImportError:
+            use_crypto = False
+
+        # 检查 openssl 是否可用
+        use_openssl = False
+        try:
+            openssl_cmd = find_command('openssl')
+            result = subprocess.run([openssl_cmd, 'version'], capture_output=True, text=True, shell=True)
+            use_openssl = (result.returncode == 0)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+        if not use_crypto and not use_openssl:
+            Colors.print("  [!] 无法生成证书，需要以下任一工具:", Colors.WARNING)
+            Colors.print("      - cryptography: pip install cryptography", Colors.OKBLUE)
+            Colors.print("      - openssl: https://slproweb.com/products/Win32OpenSSL.html", Colors.OKBLUE)
+            Colors.print("  [i] HTTP 模式仍可使用（无麦克风功能）", Colors.OKBLUE)
+            return False
+
+        result = subprocess.run(
+            [sys.executable, str(generate_cert)],
+            cwd=str(BACKEND),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            Colors.print(f"  [!] 生成输出: {result.stdout[-200:] if result.stdout else ''}", Colors.WARNING)
+            Colors.print(f"  [!] 生成错误: {result.stderr[-200:] if result.stderr else ''}", Colors.WARNING)
+
+        # 检查是否真的生成了
+        if cert_file.exists() and key_file.exists():
+            Colors.print("  [✓] 证书生成完成", Colors.OKGREEN)
+            return True
+        else:
+            Colors.print("  [✗] 证书生成失败", Colors.FAIL)
+            return False
+
+    except Exception as e:
+        Colors.print(f"  [✗] 证书生成失败: {e}", Colors.FAIL)
+        return False
+
+
+def check_port():
+    """检测端口是否被占用"""
+    print()
+    print("[i] 检测端口 7266...")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('127.0.0.1', 7266))
+        sock.close()
+        Colors.print("  [✓] 端口 7266 可用", Colors.OKGREEN)
+        return True
+    except OSError:
+        sock.close()
+        Colors.print("  [!] 端口 7266 已被占用", Colors.WARNING)
+        Colors.print("  [i] 请先关闭占用端口的程序", Colors.OKBLUE)
+
+        # 查找占用进程
+        try:
+            result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, shell=True)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if ':7266' in line and 'LISTENING' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'LISTENING' and i > 0:
+                                pid = parts[i + 1]
+                                Colors.print(f"  [i] PID: {pid}", Colors.OKBLUE)
+                                break
+        except Exception:
+            pass
+
+        return False
+
+
+def start_service():
+    """启动服务"""
+    print()
+    print("=" * 50)
+    print("  启动 Voice Bridge 服务...")
+    print("=" * 50)
+
+    local_ip = get_local_ip()
+    has_cert = (CERT_DIR / "server.crt").exists() and (CERT_DIR / "server.key").exists()
+    
+    print()
+    if has_cert:
+        print(f"  [HTTPS] 证书已加载")
+        print(f"  PC 访问:   http://localhost:7266  (推荐，无需证书)")
+        print(f"  手机访问:  https://{local_ip}:7266  (需要安装证书)")
+        print(f"  证书安装:  http://localhost:7266/setup")
+    else:
+        print(f"  [HTTP] 无证书，使用明文模式")
+        print(f"  PC 访问:   http://localhost:7266  (麦克风可用!)")
+        print(f"  手机访问:  需要先生成证书!")
+        print(f"  生成证书:  运行 python backend/generate_cert.py")
+    print()
+    print("  按 Ctrl+C 停止服务")
+    print("=" * 50)
+    print()
+
+    # 启动 uvicorn
+    try:
+        import uvicorn
+        from main import app
+
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=7266,
+            reload=False,
+            log_level="warning",
+            access_log=False,
+            ssl_certfile=str(CERT_DIR / "server.crt") if (CERT_DIR / "server.crt").exists() else None,
+            ssl_keyfile=str(CERT_DIR / "server.key") if (CERT_DIR / "server.key").exists() else None,
+        )
+    except KeyboardInterrupt:
+        print()
+        print("服务已停止")
+    except Exception as e:
+        Colors.print(f"启动失败: {e}", Colors.FAIL)
+
+
+def main():
+    """主函数"""
+    print_banner()
+
+    # 1. 检查 Python
+    if not check_python():
+        Colors.print("\n[i] 请升级 Python 后重试", Colors.WARNING)
+        input("\n按 Enter 退出...")
+        return
+
+    # 2. 检查并安装 pip 包
+    if not check_and_install_pip_packages():
+        Colors.print("\n[!] 部分功能可能不可用，尝试启动...", Colors.WARNING)
+
+    # 3. 检查 Node.js
+    if not check_node():
+        Colors.print("\n[!] Node.js 未安装，无法构建前端", Colors.WARNING)
+        Colors.print("[i] 但仍可以启动服务（如果有已构建的前端）", Colors.OKBLUE)
+
+        dist_index = FRONTEND / "dist" / "index.html"
+        if not dist_index.exists():
+            Colors.print("\n[i] 前端未构建且无法构建，退出", Colors.FAIL)
+            input("\n按 Enter 退出...")
+            return
+
+    # 4. 检查 npm 包
+    if not check_npm_packages():
+        Colors.print("\n[!] npm 依赖有问题，尝试继续...", Colors.WARNING)
+
+    # 5. 检查 FFmpeg
+    check_ffmpeg()  # 非必须，只是提示
+
+    # 6. 检查并构建前端
+    if not check_and_build_frontend():
+        Colors.print("\n[!] 前端构建失败，但仍可启动服务", Colors.WARNING)
+        Colors.print("[i] 服务将使用已存在的 dist 文件（如果有）", Colors.OKBLUE)
+
+    # 7. 检查证书
+    has_cert = check_certificate()
+
+    # 8. 检查端口
+    if not check_port():
+        Colors.print("\n[!] 端口被占用，尝试继续...", Colors.WARNING)
+
+    # 启动服务
+    print()
+    if not has_cert:
+        Colors.print("[i] HTTPS 证书未就绪，将使用 HTTP 模式", Colors.WARNING)
+        Colors.print("[i] 部分功能（麦克风）将不可用", Colors.OKBLUE)
+        print()
+
+    input("\n按 Enter 启动服务...")
+    start_service()
+
+
+if __name__ == "__main__":
+    main()
