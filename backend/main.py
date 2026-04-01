@@ -819,6 +819,35 @@ async def setup_info(request: Request):
     }
 
 
+@app.get("/api/check-https")
+async def check_https(request: Request):
+    """
+    轻量化 HTTPS 可访问性检测接口
+    模拟用户访问，忽略自签证书安全校验（适配「点继续访问」场景）
+    超时3秒，返回 {"accessible": true/false}
+    """
+    import ssl as _ssl, urllib.request as _urllib, asyncio as _asyncio
+
+    server_ip = get_local_ip()
+    https_port = get_settings().https_port  # 从配置读取
+
+    try:
+        # 忽略自签证书校验
+        ctx = _ssl._create_unverified_context()
+        url = f"https://{server_ip}:{https_port}/api/setup/info"
+
+        def _do_check():
+            req = _urllib.Request(url, headers={"User-Agent": "VoiceBridge-Check/1.0"})
+            _urllib.urlopen(req, context=ctx, timeout=3)
+            return True
+
+        loop = _asyncio.get_event_loop()
+        accessible = await loop.run_in_executor(None, _do_check)
+        return {"accessible": bool(accessible)}
+    except Exception:
+        return {"accessible": False}
+
+
 from pydantic import BaseModel as _BaseModel
 
 # ==================== 设备注册与名称 API ====================
@@ -1274,7 +1303,7 @@ async def system_monitor(request: Request):
         https_ok = False
         try:
             import urllib.request
-            urllib.request.urlopen(f"https://{get_local_ip()}:{HTTPS_PORT}/api/setup/info", timeout=2)
+            urllib.request.urlopen(f"https://{get_local_ip()}:{get_settings().https_port}/api/setup/info", timeout=2)
             https_ok = True
         except Exception:
             pass
