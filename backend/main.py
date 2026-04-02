@@ -142,7 +142,8 @@ class AppState:
         }
         self.settings_version: int = 0
     
-    def push_event(self, etype: str, data: dict = None) -> int:
+    def push_event(self, etype: str, data: dict = None, source_device: str = None) -> int:
+        """推送事件到前端（同时存储和 WebSocket 广播）"""
         with self.lock:
             self.event_ver += 1
             event = {
@@ -154,7 +155,60 @@ class AppState:
             self.events.append(event)
             if len(self.events) > 50:
                 self.events = self.events[-50:]
+            
+            # 通过 WebSocket 广播（使用 create_task 在后台调度）
+            self._schedule_broadcast(etype, data, source_device)
+            
             return self.event_ver
+    
+    def _schedule_broadcast(self, etype: str, data: dict, source_device: str):
+        """调度异步广播任务"""
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            # 创建任务但不等待，让它在后台运行
+            loop.create_task(self._broadcast_event(etype, data, source_device))
+        except RuntimeError:
+            # 没有运行中的事件循环，忽略（可能在启动时）
+            pass
+        except Exception as e:
+            logger.debug(f"调度广播失败: {e}")
+    
+    async def _broadcast_event(self, etype: str, data: dict, source_device: str):
+        """通过 WebSocket 广播事件"""
+        try:
+            # 导入在函数内避免循环导入
+            from devices.websocket import manager
+            
+            # 根据事件类型选择消息格式
+            if etype == 'sync':
+                msg = {
+                    'type': 'clipboard_update',
+                    'data': data,
+                    'source': source_device,
+                }
+            elif etype == 'settings':
+                msg = {
+                    'type': 'settings_update',
+                    'data': data,
+                }
+            elif etype == 'clear':
+                msg = {
+                    'type': 'clipboard_clear',
+                    'data': data,
+                    'source': source_device,
+                }
+            else:
+                msg = {
+                    'type': 'event',
+                    'event_type': etype,
+                    'data': data,
+                }
+            
+            # 广播到所有设备（排除源设备）
+            await manager.broadcast(msg, exclude=source_device)
+        except Exception as e:
+            logger.debug(f"WebSocket 广播失败: {e}")
     
     def get_events_since(self, last_ver: int) -> list:
         with self.lock:
@@ -1486,6 +1540,70 @@ async def db_info(request: Request):
         return {"devCount": dev_count, "logCount": log_count, "size": size_str}
     except Exception as e:
         return {"devCount": 0, "logCount": 0, "size": f"错误: {e}"}
+
+
+# ==================== 前端日志上报接口 ====================
+class _FrontendLogBody(_BaseModel):
+    level: str = "INFO"  # DEBUG, INFO, WARN, ERROR, CRITICAL
+    message: str = ""
+    trace_id: str = ""
+    device_id: str = ""
+    extra: dict = {}
+
+
+@app.post("/api/log")
+async def receive_frontend_log(body: _FrontendLogBody, request: Request):
+    """
+    接收前端日志，和后端日志存到一起
+    支持分级日志和 Trace ID 追踪
+    """
+    from shared.logging import handle_frontend_log
+    
+    handle_frontend_log(
+        level=body.level,
+        message=body.message,
+        trace_id=body.trace_id,
+        device_id=body.device_id,
+        extra=body.extra or {}
+    )
+    
+    return {"status": "ok"}
+
+
+@app.get("/api/debug/status")
+async def get_debug_status(request: Request):
+    """获取调试模式状态"""
+    from shared.logging import is_debug_mode, get_debug_mode
+    
+    return {
+        "debug_mode": get_debug_mode(),
+        "log_mode": "detail" if not get_debug_mode() else "debug"
+    }
+
+
+@app.post("/api/debug/toggle")
+async def toggle_debug_mode(request: Request):
+    """切换调试模式（仅服务端本机可访问）"""
+    if not _is_server_local(request):
+        return JSONResponse(content={"ok": False, "error": "仅服务端可访问"}, status_code=403)
+    
+    from shared.logging import get_debug_mode, set_debug_mode
+    import logging
+    
+    current = get_debug_mode()
+    new_state = not current
+    set_debug_mode(new_state)
+    
+    # 更新日志级别
+    root_logger = logging.getLogger()
+    if new_state:
+        root_logger.setLevel(logging.DEBUG)
+        logger.info(f"[调试] 调试模式已开启")
+    else:
+        root_logger.setLevel(logging.INFO)
+        logger.info(f"[调试] 调试模式已关闭")
+    
+    return {"ok": True, "debug_mode": new_state}
 
 
 @app.get("/admin/device")

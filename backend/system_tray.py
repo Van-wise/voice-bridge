@@ -234,21 +234,78 @@ class TrayIcon(Win32Icon):
 _icon: Optional[TrayIcon] = None
 
 
+def _is_debug_mode() -> bool:
+    """检查调试模式状态"""
+    try:
+        from shared.logging import get_debug_mode
+        return get_debug_mode()
+    except Exception:
+        return _config.get('debug', False)
+
+
+def _toggle_debug_mode(enabled: bool) -> None:
+    """切换调试模式"""
+    try:
+        from shared.logging import set_debug_mode
+        set_debug_mode(enabled)
+    except Exception:
+        pass
+    
+    # 更新配置
+    _config['debug'] = enabled
+    _save_config()
+    
+    # 更新日志模式
+    _set_log_mode("detail" if not enabled else "debug")
+    
+    # 记录日志
+    logger.info(f"调试模式: {'开启' if enabled else '关闭'}")
+    
+    # 重启服务以应用更改
+    _restart_service()
+
+
+def _toggle_debug(icon=None, item=None) -> None:
+    """切换调试模式（菜单回调）"""
+    current = _is_debug_mode()
+    _toggle_debug_mode(not current)
+
+
+def _open_logs_dir(icon=None, item=None) -> None:
+    """打开日志目录"""
+    try:
+        import subprocess
+        log_path = os.path.join(os.path.dirname(__file__), "..", "logs")
+        os.makedirs(log_path, exist_ok=True)
+        subprocess.run(['explorer', log_path], check=False)
+    except Exception:
+        _show_logs()
+
+
 def _create_menu() -> Menu:
     """创建右键菜单（使用 checked 回调实现动态勾选）"""
     return Menu(
         MenuItem("打开主页", _open_home),
         Menu.SEPARATOR,
+        MenuItem("🔧 调试模式", Menu(
+            MenuItem("开启调试模式", lambda: _toggle_debug_mode(True), 
+                    checked=lambda item: _is_debug_mode()),
+            MenuItem("关闭调试模式", lambda: _toggle_debug_mode(False),
+                    checked=lambda item: not _is_debug_mode()),
+            Menu.SEPARATOR,
+            MenuItem("📁 打开日志目录", _open_logs_dir),
+            MenuItem("📄 查看日志文件", _show_logs),
+        )),
         MenuItem("日志模式", Menu(
             MenuItem("简洁", lambda: _set_log_mode("simple"), checked=lambda item: _config.get('log_mode') == 'simple'),
             MenuItem("详细", lambda: _set_log_mode("detail"), checked=lambda item: _config.get('log_mode') == 'detail'),
+            MenuItem("调试", lambda: _set_log_mode("debug"), checked=lambda item: _config.get('log_mode') == 'debug'),
         )),
         MenuItem("控制台输出", Menu(
             MenuItem("开启", lambda: _toggle_console_output(True), checked=lambda item: _config.get('console_output', True)),
             MenuItem("关闭", lambda: _toggle_console_output(False), checked=lambda item: not _config.get('console_output', True)),
         )),
         Menu.SEPARATOR,
-        MenuItem("查看日志文件", _show_logs),
         MenuItem("重启服务", _restart_service),
         Menu.SEPARATOR,
         MenuItem("退出", _exit_app),

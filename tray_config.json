@@ -1,6 +1,7 @@
 {
   "console_visible": false,
-  "log_mode": "detail",
+  "log_mode": "debug",
   "window_handle": null,
-  "console_output": true
+  "console_output": true,
+  "debug": true
 }

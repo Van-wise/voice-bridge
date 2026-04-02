@@ -5,9 +5,49 @@
  * - 认证头
  * - 错误处理
  * - 类型安全
+ * - Trace ID 全链路追踪
  */
 
 import { showErrorToast, type ApiResponse } from './errorHandler'
+import logger from './logger'
+
+// ==================== Trace ID 管理 ====================
+
+/** 生成短 Trace ID（8位） */
+function generateTraceId(): string {
+  return Math.random().toString(36).substring(2, 10)
+}
+
+/** 当前请求的 Trace ID */
+let _currentTraceId: string | null = null
+
+/** 获取当前 Trace ID */
+export function getTraceId(): string | null {
+  return _currentTraceId
+}
+
+/** 设置当前 Trace ID */
+export function setTraceId(id: string): void {
+  _currentTraceId = id
+}
+
+// ==================== 请求拦截器 ====================
+
+/** 请求开始钩子 */
+const _requestStartHooks: Array<(traceId: string, method: string, path: string) => void> = []
+
+/** 请求结束钩子 */
+const _requestEndHooks: Array<(traceId: string, method: string, path: string, duration: number, ok: boolean) => void> = []
+
+/** 注册请求开始钩子 */
+export function onRequestStart(fn: (traceId: string, method: string, path: string) => void): void {
+  _requestStartHooks.push(fn)
+}
+
+/** 注册请求结束钩子 */
+export function onRequestEnd(fn: (traceId: string, method: string, path: string, duration: number, ok: boolean) => void): void {
+  _requestEndHooks.push(fn)
+}
 
 // ==================== 类型定义 ====================
 
@@ -48,34 +88,55 @@ export function isLocalAccess(): boolean {
 // ==================== 请求工具 ====================
 
 /**
- * 统一 GET 请求
+ * 统一 GET 请求（带 Trace ID）
  */
 export async function apiGet<T = any>(
   path: string,
   options: ApiOptions = {}
 ): Promise<ApiResult<T>> {
   const { showError = true, errorMessage, throwError = false } = options
+  const traceId = generateTraceId()
+  const startTime = performance.now()
+
+  // 调用开始钩子
+  _requestStartHooks.forEach(fn => fn(traceId, 'GET', path))
+
+  // 记录日志
+  logger.debug('API', `GET ${path}`, { traceId })
 
   try {
     const response = await fetch(`${getApiBase()}${path}`, {
       headers: {
         'X-Client-ID': getClientId(),
-        'X-Is-Local': isLocalAccess() ? 'true' : 'false'
+        'X-Is-Local': isLocalAccess() ? 'true' : 'false',
+        'X-Trace-ID': traceId,  // 添加 Trace ID
       }
     })
 
     const data: ApiResponse<T> = await response.json()
+    const duration = Math.round(performance.now() - startTime)
+
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'GET', path, duration, !data.error))
 
     if (data.error) {
       const msg = errorMessage || data.message || data.error
+      logger.warn('API', `GET ${path} failed`, { traceId, duration, error: msg })
       if (showError) showErrorToast(msg)
       if (throwError) throw new Error(msg)
       return { success: false, error: data.error, message: msg }
     }
 
+    logger.debug('API', `GET ${path} success`, { traceId, duration })
     return { success: true, data: data as T }
   } catch (err) {
+    const duration = Math.round(performance.now() - startTime)
     const msg = err instanceof Error ? err.message : '网络请求失败'
+
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'GET', path, duration, false))
+
+    logger.error('API', `GET ${path} exception`, { traceId, duration, error: msg })
     if (showError) showErrorToast(msg)
     if (throwError) throw err
     return { success: false, error: msg }
@@ -83,51 +144,97 @@ export async function apiGet<T = any>(
 }
 
 /**
- * 统一 POST 请求
+ * 统一 POST 请求（带 Trace ID 和超时控制）
  */
 export async function apiPost<T = any>(
   path: string,
   body: Record<string, any>,
-  options: ApiOptions = {}
+  options: ApiOptions & { timeout?: number } = {}
 ): Promise<ApiResult<T>> {
-  const { showError = true, errorMessage, throwError = false } = options
+  const { showError = true, errorMessage, throwError = false, timeout = 10000 } = options
+  const traceId = generateTraceId()
+  const startTime = performance.now()
+
+  // 调用开始钩子
+  _requestStartHooks.forEach(fn => fn(traceId, 'POST', path))
+
+  // 记录日志
+  logger.debug('API', `POST ${path}`, { traceId, bodyKeys: Object.keys(body), timeout })
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
 
   try {
     const response = await fetch(`${getApiBase()}${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Client-ID': getClientId()
+        'X-Client-ID': getClientId(),
+        'X-Trace-ID': traceId,
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: controller.signal,
     })
 
+    clearTimeout(timeoutId)
     const data: ApiResponse<T> = await response.json()
+    const duration = Math.round(performance.now() - startTime)
+
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'POST', path, duration, !data.error))
 
     if (data.error) {
       const msg = errorMessage || data.message || data.error
+      logger.warn('API', `POST ${path} failed`, { traceId, duration, error: msg })
       if (showError) showErrorToast(msg)
       if (throwError) throw new Error(msg)
       return { success: false, error: data.error, message: msg }
     }
 
+    logger.debug('API', `POST ${path} success`, { traceId, duration })
     return { success: true, data: data as T }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : '网络请求失败'
+    clearTimeout(timeoutId)
+    const duration = Math.round(performance.now() - startTime)
+    
+    let msg = '网络请求失败'
+    let errorCode = 'REQUEST_ERROR'
+    
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        msg = '请求超时'
+        errorCode = 'TIMEOUT'
+        logger.warn('API', `POST ${path} timeout`, { traceId, duration, timeout })
+      } else {
+        msg = err.message
+        logger.error('API', `POST ${path} exception`, { traceId, duration, error: msg })
+      }
+    }
+
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'POST', path, duration, false))
+
     if (showError) showErrorToast(msg)
     if (throwError) throw err
-    return { success: false, error: msg }
+    return { success: false, error: errorCode, message: msg }
   }
 }
 
 /**
- * 带超时控制的请求
+ * 带超时控制的请求（带 Trace ID）
  */
 export async function apiFetch<T = any>(
   path: string,
   options: RequestInit & { timeout?: number } = {}
 ): Promise<ApiResult<T>> {
   const { timeout = 10000, ...fetchOptions } = options
+  const traceId = generateTraceId()
+  const startTime = performance.now()
+
+  // 调用开始钩子
+  _requestStartHooks.forEach(fn => fn(traceId, 'FETCH', path))
+
+  logger.debug('API', `FETCH ${path}`, { traceId, timeout })
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeout)
@@ -139,28 +246,48 @@ export async function apiFetch<T = any>(
       headers: {
         'X-Client-ID': getClientId(),
         'X-Is-Local': isLocalAccess() ? 'true' : 'false',
+        'X-Trace-ID': traceId,
         ...fetchOptions.headers
       }
     })
 
     clearTimeout(timeoutId)
+    const duration = Math.round(performance.now() - startTime)
+
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'FETCH', path, duration, response.ok))
 
     const data: ApiResponse<T> = await response.json()
 
     if (data.error) {
+      logger.warn('API', `FETCH ${path} failed`, { traceId, duration, error: data.error })
       return { success: false, error: data.error, message: data.message }
     }
 
+    logger.debug('API', `FETCH ${path} success`, { traceId, duration })
     return { success: true, data: data as T }
   } catch (err) {
     clearTimeout(timeoutId)
-    const msg = err instanceof Error ? err.message : '请求失败'
+    const duration = Math.round(performance.now() - startTime)
     
-    if (err instanceof Error && err.name === 'AbortError') {
-      return { success: false, error: 'TIMEOUT', message: '请求超时' }
+    // 调用结束钩子
+    _requestEndHooks.forEach(fn => fn(traceId, 'FETCH', path, duration, false))
+
+    let msg = '请求失败'
+    let errorCode = 'REQUEST_ERROR'
+    
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        msg = '请求超时'
+        errorCode = 'TIMEOUT'
+        logger.warn('API', `FETCH ${path} timeout`, { traceId, duration, timeout })
+      } else {
+        msg = err.message
+        logger.error('API', `FETCH ${path} exception`, { traceId, duration, error: msg })
+      }
     }
     
-    return { success: false, error: msg }
+    return { success: false, error: errorCode, message: msg }
   }
 }
 

@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import './style.css'
 import App from './App.vue'
 import { initErrorHandler } from './utils/errorHandlerInit'
+import './utils/debug'  // 引入调试模块
 
 // 获取 Vue 应用实例
 const app = createApp(App)

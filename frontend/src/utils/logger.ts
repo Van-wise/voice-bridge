@@ -7,6 +7,7 @@
  *  - 按级别过滤（dev 模式全开，prod 模式仅 WARN/ERROR）
  *  - 每个标签可独立开关
  *  - 可选的 session ID（WebSocket 连接时注入，用于关联后端日志）
+ *  - 自动上报 ERROR/WARN 到后端 /api/log 接口
  *
  * 使用方法：
  *   import { logger } from '@/utils/logger'
@@ -29,6 +30,7 @@ interface LogEntry {
   data?: unknown
   timestamp: number
   sessionId?: string
+  traceId?: string
 }
 
 // ==================== 配置 ====================
@@ -38,6 +40,28 @@ const IS_DEV = import.meta.env.DEV
 // 每个标签的日志级别，undefined 表示跟随全局级别
 const _tagLevels: Partial<Record<string, LogLevel>> = {
   // 默认 DEBUG 在开发模式，INFO 在生产模式
+}
+
+// ==================== Trace ID（关联前后端） ====================
+
+let _traceId: string | null = null
+
+/**
+ * 设置当前 Trace ID（由 API 模块自动设置）
+ */
+export function setTraceId(id: string | null): void {
+  _traceId = id
+}
+
+export function getTraceId(): string | null {
+  return _traceId
+}
+
+/**
+ * 生成短 Trace ID
+ */
+export function generateTraceId(): string {
+  return Math.random().toString(36).substring(2, 10)
 }
 
 // ==================== Session ID（关联后端 traceId） ====================
@@ -88,8 +112,9 @@ function formatMessage(entry: LogEntry): string {
     fractionalSecondDigits: 3,
   })
   const sid = entry.sessionId ? `[${entry.sessionId}]` : ''
+  const tid = entry.traceId ? `[T:${entry.traceId}]` : ''
   const dataStr = entry.data !== undefined ? ` ${JSON.stringify(entry.data)}` : ''
-  return `[VB][${entry.level}][${entry.tag}]${sid} ${entry.message}${dataStr}`
+  return `[VB][${entry.level}][${entry.tag}]${sid}${tid} ${entry.message}${dataStr}`
 }
 
 function getCallerLocation(): string {
@@ -107,11 +132,57 @@ function getCallerLocation(): string {
   }
 }
 
+// ==================== 后端上报 ====================
+
+let _deviceId: string | null = null
+
+/**
+ * 设置设备 ID（从 localStorage 获取）
+ */
+export function setDeviceId(id: string | null): void {
+  _deviceId = id
+}
+
+/**
+ * 上报日志到后端
+ * ERROR 和 WARN 级别自动上报
+ */
 function sendToBackend(entry: LogEntry): void {
-  // 可选：将关键日志发送到后端（ WARN/ERROR 级别）
-  // 当前暂不启用，保留接口以备后用
-  if (entry.level === 'ERROR' || entry.level === 'WARN') {
-    // navigator.sendBeacon('/api/logs/client', JSON.stringify(entry))
+  // 只上报 ERROR 和 WARN
+  if (entry.level !== 'ERROR' && entry.level !== 'WARN') {
+    return
+  }
+
+  // 获取设备 ID
+  if (!_deviceId) {
+    _deviceId = localStorage.getItem('vb_client_id') || 'unknown'
+  }
+
+  // 构建上报数据
+  const logData = {
+    level: entry.level,
+    message: entry.message,
+    trace_id: entry.traceId || _traceId || '',
+    device_id: _deviceId,
+    extra: {
+      tag: entry.tag,
+      data: entry.data,
+      session_id: entry.sessionId,
+      url: window.location.href,
+      user_agent: navigator.userAgent,
+    }
+  }
+
+  // 使用 sendBeacon 确保可靠上报
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/log', JSON.stringify(logData))
+  } else {
+    // 兜底：使用 fetch
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(logData),
+    }).catch(() => {})  // 静默失败，不影响主流程
   }
 }
 
@@ -205,7 +276,11 @@ export const logger = {
   error,
   setSessionId,
   getSessionId,
+  setTraceId,
+  getTraceId,
+  generateTraceId,
   setTagLevel,
+  setDeviceId,
 }
 
 export default logger

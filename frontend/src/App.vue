@@ -3,12 +3,13 @@ import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import QRCode from 'qrcode'
 import SimpleRecorder from './components/SimpleRecorder.vue'
 import ErrorBoundary from './components/ErrorBoundary.vue'
-import { apiGet, apiPost } from './utils/api'
-import { errorCollector, setToastFunction } from './utils/errorHandler'
+import { apiGet, apiPost, getApiBase, getClientId } from './utils/api'
+import { setToastFunction } from './utils/errorHandler'
+import { logger, setDeviceId } from './utils/logger'
 
 // ==================== 错误处理 ====================
 function handleComponentError(error: Error, errorInfo: any) {
-  console.error('[App] 组件错误:', error.message, errorInfo)
+  logger.error('App', '组件错误', { message: error.message, errorInfo })
 }
 
 // 注册全局 Toast 函数（供 errorHandler 使用）
@@ -52,6 +53,9 @@ const isPC = computed(() => location.hostname === '127.0.0.1' || location.hostna
 const charCount = computed(() => text.value.length)
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 
+// 初始化设备 ID 用于日志上报
+setDeviceId(clientId.value)
+
 // 睡眠模式
 const isSleeping = ref(false)
 const lastActivity = ref(Date.now())
@@ -63,10 +67,15 @@ const devices = ref<any[]>([])
 // 齿轮双击
 const gearLastClick = ref(0)
 
-// 轮询
+// 轮询（已废弃，改用 WebSocket）
 let pollTimer: number | null = null
 let pollFails = 0
 let sleepCheckTimer: number | null = null
+
+// WebSocket 剪贴板连接
+let wsClipboard: WebSocket | null = null
+let wsReconnectTimer: number | null = null
+let wsHeartbeatTimer: number | null = null
 
 // 历史滚动加载
 const scrollLoading = ref(false)
@@ -97,32 +106,6 @@ const contentCategories = [
   { value: 'phone', label: '📞 电话' },
 ]
 
-// ==================== API ====================
-// 动态获取 API 地址（使用当前页面 origin，支持手机扫码访问）
-const getApiBase = () => window.location.origin
-
-async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${getApiBase()}${path}`, {
-    headers: {
-      'X-Client-ID': clientId.value,
-      'X-Is-Local': isPC.value ? 'true' : 'false'
-    }
-  })
-  return res.json()
-}
-
-async function apiPost<T>(path: string, data: any): Promise<T> {
-  const res = await fetch(`${getApiBase()}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Client-ID': clientId.value
-    },
-    body: JSON.stringify(data)
-  })
-  return res.json()
-}
-
 // ==================== Toast ====================
 function showToast(message: string, type: 'ok' | 'err' | 'warn' | 'loading' = 'ok', duration = 2000) {
   if (toastTimer.value) clearTimeout(toastTimer.value)
@@ -138,39 +121,33 @@ function showToast(message: string, type: 'ok' | 'err' | 'warn' | 'loading' = 'o
   }
 }
 
-// ==================== 睡眠模式 ====================
+// ==================== 睡眠模式（WebSocket 版本，已简化） ====================
+// WebSocket 自动处理连接和重连，不再需要轮询
 function onActivity() {
   lastActivity.value = Date.now()
-  if (isSleeping.value) {
-    isSleeping.value = false
-    setDot(isOnline.value)
-    restartPoll(800)
-  }
+  // WebSocket 会自动维护连接，不需要额外处理
 }
 
 function checkSleep() {
   const idle = Date.now() - lastActivity.value
+  // 睡眠模式下只是关闭指示灯，不影响 WebSocket
   if (!isSleeping.value && idle >= sleepInterval) {
     isSleeping.value = true
-    restartPoll(30000)
     setDot(false)
   } else if (isSleeping.value && idle < sleepInterval) {
     isSleeping.value = false
-    restartPoll(800)
-    setDot(isOnline.value)
+    setDot(true)
   }
 }
 
-function restartPoll(interval: number) {
-  if (pollTimer) clearInterval(pollTimer)
-  pollTimer = window.setInterval(doPoll, interval)
-}
+// 不再需要 restartPoll
 
-// ==================== 轮询 ====================
+// ==================== 轮询（已废弃，改用 WebSocket） ====================
+// 保留 doPoll 用于初始化，不使用定时轮询
 async function doPoll() {
   try {
-    // 使用改进的 API 工具，静默处理轮询错误
-    const result = await apiGet(`/api/poll?last_ev=${lastEv.value}`, { showError: false })
+    // 使用统一的 API 工具，静默处理轮询错误
+    const result = await apiGet<any>(`/api/poll?last_ev=${lastEv.value}`, { showError: false })
     
     if (!result.success || !result.data) {
       pollFails++
@@ -178,6 +155,7 @@ async function doPoll() {
         isOnline.value = false
         showToast('连接断开', 'err')
         setDot(false)
+        logger.warn('Poll', '连接断开，3次轮询失败')
       }
       return
     }
@@ -187,6 +165,7 @@ async function doPoll() {
     if (!isOnline.value) {
       isOnline.value = true
       showToast('已连接', 'ok', 1500)
+      logger.info('Poll', '后端连接成功')
     }
 
     if (resp.local_ip) localIp.value = resp.local_ip
@@ -214,7 +193,124 @@ async function doPoll() {
       isOnline.value = false
       showToast('连接断开', 'err')
       setDot(false)
+      logger.error('Poll', '轮询异常', { pollFails })
     }
+  }
+}
+
+// ==================== WebSocket 剪贴板连接 ====================
+function connectClipboardWS() {
+  const deviceId = localStorage.getItem('vb_device_id') || 'unknown'
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.host
+  
+  wsClipboard = new WebSocket(`${protocol}//${host}/ws/${deviceId}`)
+  
+  wsClipboard.onopen = () => {
+    isOnline.value = true
+    setDot(true)
+    pollFails = 0
+    showToast('已连接', 'ok', 1500)
+    logger.info('WS', '剪贴板 WebSocket 连接成功')
+    
+    // 启动心跳
+    startWsHeartbeat()
+  }
+  
+  wsClipboard.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      handleWsMessage(msg)
+    } catch (e) {
+      logger.error('WS', '解析消息失败', { error: e })
+    }
+  }
+  
+  wsClipboard.onclose = () => {
+    isOnline.value = false
+    setDot(false)
+    stopWsHeartbeat()
+    logger.warn('WS', '剪贴板 WebSocket 断开，3秒后重连')
+    
+    // 3秒后重连
+    if (!wsReconnectTimer) {
+      wsReconnectTimer = window.setTimeout(() => {
+        wsReconnectTimer = null
+        connectClipboardWS()
+      }, 3000)
+    }
+  }
+  
+  wsClipboard.onerror = (e) => {
+    logger.error('WS', 'WebSocket 错误', { error: e })
+  }
+}
+
+function handleWsMessage(msg: any) {
+  if (!msg || !msg.type) return
+  
+  switch (msg.type) {
+    case 'pong':
+      // 心跳响应，不需要处理
+      break
+      
+    case 'clipboard_update':
+      // 收到剪贴板更新
+      if (msg.data && msg.data.text !== undefined) {
+        if (msg.source !== localStorage.getItem('vb_device_id')) {
+          text.value = msg.data.text
+          const fromTip = msg.data.device_type === 'mobile' ? '📱 收到同步' : '💻 收到同步'
+          showToast(fromTip, 'ok', 1500)
+          logger.info('WS', '收到剪贴板同步', { source: msg.source })
+        }
+      }
+      break
+      
+    case 'settings_update':
+      // 设置更新
+      if (msg.data) {
+        settings.value = { ...settings.value, ...msg.data }
+        logger.info('WS', '收到设置更新')
+      }
+      break
+      
+    case 'device_list':
+      // 设备列表更新
+      if (msg.data && msg.data.devices) {
+        devices.value = msg.data.devices
+      }
+      break
+      
+    default:
+      logger.debug('WS', '未知消息类型', { type: msg.type })
+  }
+}
+
+function startWsHeartbeat() {
+  stopWsHeartbeat()
+  wsHeartbeatTimer = window.setInterval(() => {
+    if (wsClipboard && wsClipboard.readyState === WebSocket.OPEN) {
+      wsClipboard.send(JSON.stringify({ type: 'ping' }))
+    }
+  }, 30000)
+}
+
+function stopWsHeartbeat() {
+  if (wsHeartbeatTimer) {
+    clearInterval(wsHeartbeatTimer)
+    wsHeartbeatTimer = null
+  }
+}
+
+function disconnectClipboardWS() {
+  stopWsHeartbeat()
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer)
+    wsReconnectTimer = null
+  }
+  if (wsClipboard) {
+    wsClipboard.close()
+    wsClipboard = null
   }
 }
 
@@ -251,24 +347,29 @@ function handleEvent(ev: any) {
 // ==================== 设置 ====================
 async function loadSettings() {
   try {
-    const data: any = await apiGet('/api/settings')
-    if (data._ver !== undefined) {
-      settingsVersion.value = data._ver
-      delete data._ver
-      settings.value = { ...settings.value, ...data }
+    const result = await apiGet<any>('/api/settings', { showError: false })
+    if (result.success && result.data) {
+      const data = result.data
+      if (data._ver !== undefined) {
+        settingsVersion.value = data._ver
+        delete data._ver
+        settings.value = { ...settings.value, ...data }
+      }
     }
   } catch (e) {
-    console.error('加载设置失败', e)
+    logger.error('Settings', '加载设置失败', { error: e })
   }
 }
 
 async function saveSettings() {
   try {
-    const data: any = await apiPost('/api/settings', settings.value)
-    if (data._ver) settingsVersion.value = data._ver
-    if (data.settings) settings.value = { ...settings.value, ...data.settings }
+    const result = await apiPost<any>('/api/settings', settings.value, { showError: false })
+    if (result.success && result.data) {
+      if (result.data._ver) settingsVersion.value = result.data._ver
+      if (result.data.settings) settings.value = { ...settings.value, ...result.data.settings }
+    }
   } catch (e) {
-    console.error('保存设置失败', e)
+    logger.error('Settings', '保存设置失败', { error: e })
   }
 }
 
@@ -355,20 +456,25 @@ async function doSync() {
 
   syncing.value = true
   showToast('正在同步...', 'loading', 0)
+  logger.info('Sync', '开始同步文本', { length: text.value.length })
+  
   try {
-    const data: any = await apiPost('/api/sync', {
+    const result = await apiPost<any>('/api/sync', {
       text: text.value.trim(),
       mode: settings.value.mode,
       auto_clear: settings.value.auto_clear,
       manual: true
-    })
+    }, { showError: false, timeout: 10000 })  // 10秒超时
 
     syncing.value = false
-    if (data.success) {
+    
+    if (result.success && result.data) {
+      const data = result.data
       let msg = '✅ 已同步'
       if (data.action === 'pasted') msg = '✅ 已同步并粘贴'
       else if (data.action === 'copied') msg = '✅ 已同步 + 复制'
       showToast(msg, 'ok', 2000)
+      logger.info('Sync', '同步成功', { action: data.action })
 
       flashBorder(true)
 
@@ -380,13 +486,16 @@ async function doSync() {
       if (navigator.vibrate) navigator.vibrate(50)
       if (showHistory.value) loadHistory()
     } else {
-      showToast('❌ ' + (data.error || '同步失败'), 'err', 3000)
+      const errMsg = result.message || result.error || '同步失败'
+      showToast('❌ ' + errMsg, 'err', 3000)
       flashBorder(false)
+      logger.warn('Sync', '同步失败', { error: errMsg })
     }
   } catch (e) {
     syncing.value = false
     showToast('❌ 网络错误', 'err', 3000)
     flashBorder(false)
+    logger.error('Sync', '同步异常', { error: e })
   }
 }
 
@@ -465,22 +574,32 @@ function clipboardFallback(text: string, cb: (ok: boolean) => void) {
 
 // ==================== 清空 ====================
 async function doClear() {
-  text.value = ''
   try {
-    await apiPost('/api/clear', {})
-  } catch (e) {}
-  showToast('🧹 已清空（两端同步）', 'ok', 1200)
+    // 先发送到后端，如果成功再清空本地
+    const result = await apiPost('/api/clear', {}, { showError: false, timeout: 5000 })
+    if (result.success) {
+      text.value = ''
+      showToast('🧹 已清空（两端同步）', 'ok', 1200)
+    } else {
+      showToast('清空失败', 'err', 2000)
+    }
+  } catch (e) {
+    logger.error('Clear', '清空失败', { error: e })
+    showToast('清空失败', 'err', 2000)
+  }
 }
 
 // ==================== 历史 ====================
 async function loadHistory() {
   try {
-    const data: any = await apiGet(`/api/history?offset=0&limit=20`)
-    history.value = data.items || []
-    historyTotal.value = data.total || 0
-    historyOffset.value = history.value.length
+    const result = await apiGet<any>(`/api/history?offset=0&limit=20`, { showError: false })
+    if (result.success && result.data) {
+      history.value = result.data.items || []
+      historyTotal.value = result.data.total || 0
+      historyOffset.value = history.value.length
+    }
   } catch (e) {
-    console.error('加载历史失败', e)
+    logger.error('History', '加载历史失败', { error: e })
   }
 }
 
@@ -488,13 +607,15 @@ async function loadMoreHistory() {
   if (scrollLoading.value) return
   scrollLoading.value = true
   try {
-    const data: any = await apiGet(`/api/history?offset=${historyOffset.value}&limit=20`)
-    const newItems = data.items || []
-    history.value = [...history.value, ...newItems]
-    historyOffset.value += newItems.length
-    historyTotal.value = data.total || 0
+    const result = await apiGet<any>(`/api/history?offset=${historyOffset.value}&limit=20`, { showError: false })
+    if (result.success && result.data) {
+      const newItems = result.data.items || []
+      history.value = [...history.value, ...newItems]
+      historyOffset.value += newItems.length
+      historyTotal.value = result.data.total || 0
+    }
   } catch (e) {
-    console.error('加载更多历史失败', e)
+    logger.error('History', '加载更多历史失败', { error: e })
   }
   scrollLoading.value = false
 }
@@ -578,24 +699,23 @@ const micSettings = ref({
 
 async function loadMicSettings() {
   try {
-    const res = await fetch(`${getApiBase()}/api/audio/settings`)
-    if (!res.ok) return
-    micSettings.value = { ...micSettings.value, ...(await res.json()) }
+    const result = await apiGet<any>('/api/audio/settings', { showError: false })
+    if (result.success && result.data) {
+      micSettings.value = { ...micSettings.value, ...result.data }
+    }
   } catch (e) {
-    console.error('加载麦克风设置失败', e)
+    logger.error('MicSettings', '加载麦克风设置失败', { error: e })
   }
 }
 
 async function saveMicSettings() {
   try {
-    await fetch(`${getApiBase()}/api/audio/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(micSettings.value)
-    })
-    showToast('麦克风设置已更新', 'ok', 1500)
+    const result = await apiPost<any>('/api/audio/settings', micSettings.value, { showError: false })
+    if (result.success) {
+      showToast('麦克风设置已更新', 'ok', 1500)
+    }
   } catch (e) {
-    console.error('保存麦克风设置失败', e)
+    logger.error('MicSettings', '保存麦克风设置失败', { error: e })
   }
 }
 
@@ -607,9 +727,12 @@ function toggleMicSetting(key: string) {
 // ==================== 抽屉 ====================
 async function loadStats() {
   try {
-    stats.value = await apiGet('/api/stats')
+    const result = await apiGet<any>('/api/stats', { showError: false })
+    if (result.success && result.data) {
+      stats.value = result.data
+    }
   } catch (e) {
-    console.error('加载统计失败', e)
+    logger.error('Drawer', '加载统计失败', { error: e })
   }
 }
 
@@ -665,14 +788,15 @@ async function saveNewPort() {
   }
   showToast('正在检查端口冲突...', 'loading', 0)
   try {
-    const checkData: any = await apiPost('/api/port/check', { port: newPort })
-    if (!checkData.available) {
+    const checkResult = await apiPost<any>('/api/port/check', { port: newPort }, { showError: false })
+    if (!checkResult.success || !checkResult.data?.available) {
       showToast('❌ 端口被占用', 'err', 3000)
       portInput.value = String(currentPort.value)
       return
     }
-    await apiPost('/api/settings', { port: newPort })
-    await apiPost('/api/restart', {})
+    
+    await apiPost<any>('/api/settings', { port: newPort }, { showError: false })
+    await apiPost<any>('/api/restart', {}, { showError: false })
     showToast('端口已更新，正在重启...', 'warn', 3000)
     closeDrawer()
     setTimeout(() => {
@@ -681,6 +805,7 @@ async function saveNewPort() {
     }, 4000)
   } catch (e) {
     showToast('保存失败', 'err', 3000)
+    logger.error('Port', '端口保存失败', { error: e })
   }
   editingPort.value = false
 }
@@ -694,11 +819,13 @@ function cancelPortEdit() {
 async function drawerRestart() {
   closeDrawer()
   showToast('正在重启服务...', 'warn', 0)
+  logger.info('Drawer', '请求重启服务')
   try {
-    await apiPost('/api/restart', {})
+    await apiPost('/api/restart', {}, { showError: false })
     setTimeout(() => { location.reload() }, 3000)
   } catch (e) {
     showToast('重启失败', 'err', 3000)
+    logger.error('Drawer', '重启服务失败', { error: e })
   }
 }
 
@@ -734,8 +861,12 @@ function showLogs() {
     if (!lc || !ts) return
     lc.textContent = '加载中...'
     try {
-      const data: any = await apiGet('/api/logs')
-      const logs = data.logs || []
+      const result = await apiGet<any>('/api/logs', { showError: false })
+      if (!result.success || !result.data) {
+        lc.textContent = '加载失败'
+        return
+      }
+      const logs = result.data.logs || []
       if (!logs.length) {
         lc.textContent = '暂无日志'
         ts.textContent = ''
@@ -764,16 +895,20 @@ function showLogs() {
 async function initQR() {
   if (!qrCanvas.value) return
   try {
-    const info: any = await apiGet('/api/info')
-    // 使用当前访问地址作为二维码内容
-    qrUrl.value = info.lan_url || window.location.origin
+    const result = await apiGet<any>('/api/info', { showError: false })
+    if (!result.success || !result.data) {
+      qrUrl.value = window.location.origin
+    } else {
+      // 使用当前访问地址作为二维码内容
+      qrUrl.value = result.data.lan_url || window.location.origin
+    }
     await QRCode.toCanvas(qrCanvas.value, qrUrl.value, {
       width: 160,
       margin: 1,
       color: { dark: '#1a1a2e', light: '#ffffff' }
     })
   } catch (e) {
-    console.error('二维码生成失败', e)
+    logger.error('QRCode', '二维码生成失败', { error: e })
   }
 }
 
@@ -842,8 +977,12 @@ onMounted(() => {
   
   loadSettings()
   loadMicSettings()
+  
+  // 初始化：先拉一次初始数据，然后建立 WebSocket 连接
   doPoll()
-  pollTimer = window.setInterval(doPoll, 800)
+  
+  // 启动 WebSocket 剪贴板连接（替代轮询）
+  connectClipboardWS()
 
   sleepCheckTimer = window.setInterval(checkSleep, 10000)
   const events = ['keydown', 'mousedown', 'touchstart', 'scroll', 'input']
@@ -859,9 +998,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
   if (toastTimer.value) clearTimeout(toastTimer.value)
   if (sleepCheckTimer) clearInterval(sleepCheckTimer)
+  disconnectClipboardWS()  // 断开 WebSocket
   document.removeEventListener('click', closeDropdown)
 })
 </script>
