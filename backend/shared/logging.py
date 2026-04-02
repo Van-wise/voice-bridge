@@ -30,7 +30,7 @@ except ImportError:
     pass  # Linux/Mac 直接支持 ANSI
 
 # ==================== 全局配置 ====================
-_log_mode: str = "simple"  # "simple" | "detail"
+_log_mode: str = "detail"  # "simple" | "detail"（默认详细模式）
 _log_file_path: str = ""    # 记录日志文件路径供外部访问
 _enable_console: bool = False  # 控制台输出开关
 _console_handler: Optional["logging.StreamHandler"] = None  # 控制台 handler 引用
@@ -225,7 +225,7 @@ _initialized_logger: Optional[logging.Logger] = None  # 缓存 logger
 def setup_logging(
     log_dir: Optional[str] = None,
     log_level: str = "INFO",
-    mode: str = "simple",
+    mode: str = "detail",  # 默认详细模式
     enable_console: bool = True,
 ) -> logging.Logger:
     """
@@ -392,6 +392,30 @@ def get_recent_logs_tail(lines: int = 50) -> str:
             return ''.join(tail_lines)
     except Exception:
         return ""
+
+
+# ==================== asyncio 异常处理 ====================
+def _suppress_asyncio_warnings() -> None:
+    """
+    抑制 asyncio 相关已知问题的异常输出
+    包括 Windows Python 3.12+ Proactor 事件循环的 _call_connection_lost 异常
+    """
+    import asyncio
+    import sys
+    
+    # 保存原始 excepthook
+    _original_excepthook = sys.excepthook
+    
+    def _custom_excepthook(exc_type, exc_value, exc_traceback):
+        # 忽略 asyncio Proactor 连接丢失的已知异常
+        if exc_type is RuntimeError and exc_value and "_ProactorBasePipeTransport._call_connection_lost" in str(exc_value):
+            return
+        # 也忽略 AttributeError（某些 asyncio 内部异常）
+        if exc_type is AttributeError and exc_value and "_call_connection_lost" in str(exc_value):
+            return
+        _original_excepthook(exc_type, exc_value, exc_traceback)
+    
+    sys.excepthook = _custom_excepthook
 
 
 # ==================== 便捷异常记录函数 ====================

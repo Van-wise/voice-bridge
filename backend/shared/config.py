@@ -7,6 +7,7 @@ Voice Bridge Backend - 配置管理
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -22,6 +23,12 @@ class Settings(BaseSettings):
 
     # CORS（允许所有来源，开发环境用）
     cors_origins: list[str] = ["*"]
+
+    # HTTPS 证书（支持环境变量或绝对路径）
+    # 示例：SSL_CERT_FILE=/path/to/server.crt
+    #        SSL_KEY_FILE=/path/to/server.key
+    ssl_cert_file: Optional[str] = None
+    ssl_key_file: Optional[str] = None
 
     # WebSocket
     ws_heartbeat_interval: int = 30  # 秒
@@ -48,6 +55,23 @@ class Settings(BaseSettings):
         if self.database_url:
             return Path(self.database_url)
         return Path(__file__).parent.parent / "voice_bridge.db"
+
+    @property
+    def cert_dir(self) -> Path:
+        """证书目录"""
+        return Path(__file__).parent.parent / "certs"
+
+    @property
+    def default_cert_file(self) -> Optional[Path]:
+        """默认证书文件"""
+        f = self.cert_dir / "server.crt"
+        return f if f.exists() else None
+
+    @property
+    def default_key_file(self) -> Optional[Path]:
+        """默认私钥文件"""
+        f = self.cert_dir / "server.key"
+        return f if f.exists() else None
 
 
 @lru_cache()

@@ -10,6 +10,8 @@ import socket
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from shared.network import get_local_ip
+
 # 服务启动时间（用于计算运行时长）
 START_TIME = time.time()
 
@@ -100,8 +102,17 @@ if __name__ == "__main__":
 # 初始化日志系统（文件+控制台双输出）
 logger = setup_logging(log_level="INFO", enable_console=True)
 
+# 抑制 asyncio Proactor 连接丢失的已知异常
+from shared.logging import _suppress_asyncio_warnings
+_suppress_asyncio_warnings()
+
 # 托盘在 logging 初始化后启动
 import threading
+
+# 初始化父进程控制台窗口句柄（用于重启时关闭 bat 脚本窗口）
+from system_tray import _init_parent_console
+_init_parent_console()
+
 threading.Thread(target=_start_tray, daemon=True, name="VB-Tray").start()
 
 # 周期性心跳日志
@@ -176,37 +187,24 @@ state = AppState()
 
 
 # ==================== 前端静态文件服务 ====================
-# 进程级别防重：使用文件锁
-_frontend_mount_marker = os.path.join(os.path.dirname(__file__), ".frontend_mounted")
-_frontend_mounted = os.path.exists(_frontend_mount_marker)
-
 
 def setup_frontend_static(app: FastAPI):
-    """配置前端静态文件服务"""
-    global _frontend_mounted
-    if _frontend_mounted:
-        return
-
+    """配置前端静态文件服务（仅挂载，不打印日志）"""
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
-
+    
     frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 
     if frontend_dist.exists():
         assets_path = frontend_dist / "assets"
         if assets_path.exists():
-            app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
-            logger.info(f"已挂载前端静态文件: {assets_path}")
+            if not any(r.path == "/assets" for r in app.routes if hasattr(r, 'path')):
+                app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
 
         frontend_public = Path(__file__).parent.parent / "frontend" / "public"
         if frontend_public.exists():
-            app.mount("/public", StaticFiles(directory=str(frontend_public)), name="public")
-
-    _frontend_mounted = True
-    try:
-        Path(_frontend_mount_marker).touch()
-    except Exception:
-        pass
+            if not any(r.path == "/public" for r in app.routes if hasattr(r, 'path')):
+                app.mount("/public", StaticFiles(directory=str(frontend_public)), name="public")
 
 
 # ==================== 全局初始化锁（防止重复初始化） ====================
@@ -228,9 +226,19 @@ def _ensure_single_init():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
+    from pathlib import Path
+    
     # 启动 - 只有第一个服务需要初始化
     if _ensure_single_init():
         logger.info("Voice Bridge Backend starting...")
+        
+        # 挂载前端静态文件（只在首次初始化时执行）
+        frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+        if frontend_dist.exists():
+            assets_path = frontend_dist / "assets"
+            if assets_path.exists():
+                logger.info(f"已挂载前端静态文件: {assets_path}")
+        
         audio_startup()   # 初始化音频模块（建表 + 加载历史）
     yield
     # 关闭 - 只在所有服务结束时清理一次
@@ -244,6 +252,9 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+# 配置前端静态文件（在 app 创建后挂载）
+setup_frontend_static(app)
 
 # 添加请求日志中间件（简洁模式）
 app.add_middleware(RequestLoggingMiddleware, verbose=False)
@@ -288,18 +299,6 @@ async def general_error_handler(request: Request, error: Exception):
 
 # ==================== 兼容旧版 API 路由 ====================
 legacy_router = APIRouter(prefix="/api", tags=["legacy"])
-
-
-def get_local_ip() -> str:
-    """获取本机局域网 IP"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except:
-        return '127.0.0.1'
 
 
 @legacy_router.get("/poll")
@@ -651,6 +650,39 @@ async def check_port(request_data: dict):
         return {'available': False, 'reason': 'Port in use'}
 
 
+# ==================== 错误上报接口 ====================
+
+@legacy_router.post("/error-report")
+async def report_error(request_data: dict, request: Request):
+    """
+    前端错误上报接口
+    收集前端 JS 错误用于分析和调试
+    """
+    error_info = {
+        'message': request_data.get('message', ''),
+        'stack': request_data.get('stack', ''),
+        'type': request_data.get('type', 'unknown'),
+        'timestamp': request_data.get('timestamp', 0),
+        'user_agent': request.headers.get('User-Agent', ''),
+        'url': request_data.get('url', ''),
+        'client_ip': request.client.host if request.client else 'unknown',
+    }
+    
+    # 只记录错误，不中断服务
+    logger.warning(
+        f"[Frontend Error] type={error_info['type']} | "
+        f"message={error_info['message'][:100]} | "
+        f"url={error_info['url'][:50]} | "
+        f"ip={error_info['client_ip']}"
+    )
+    
+    # 如果有堆栈，也记录
+    if error_info['stack']:
+        logger.debug(f"[Frontend Error] Stack: {error_info['stack'][:200]}")
+    
+    return {'success': True, 'received': True}
+
+
 # ==================== 注册路由 ====================
 app.include_router(devices_router)
 app.include_router(clipboard_router)
@@ -658,9 +690,6 @@ app.include_router(audio_router)   # 简化音频上传
 app.include_router(vmic_router)    # 虚拟麦克风 API
 app.include_router(ffmpeg_router)   # FFmpeg 音频路由 API
 app.include_router(legacy_router)  # 兼容旧版 API
-
-# 配置前端静态文件（在所有API路由之后）
-setup_frontend_static(app)
 
 
 # ==================== 健康检查 ====================
@@ -712,6 +741,23 @@ async def admin_page(request: Request):
             return FileResponse(str(admin_file))
 
     return {"error": "admin.html not found, please build frontend"}
+
+
+@app.get("/favicon.svg")
+async def favicon():
+    """返回 favicon"""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    
+    favicon_path = Path(__file__).parent.parent / "frontend" / "public" / "favicon.svg"
+    if favicon_path.exists():
+        return FileResponse(str(favicon_path), media_type="image/svg+xml")
+    
+    # 兜底：返回默认图标
+    return FileResponse(
+        str(Path(__file__).parent / "certs" / "server.crt"),  # 不会真的返回，只为通过类型检查
+        media_type="image/svg+xml"
+    )
 
 
 @app.get("/setup")
@@ -1554,11 +1600,12 @@ def run():
     import os
     import threading
 
-    # 检查证书
-    cert_dir = os.path.join(os.path.dirname(__file__), "certs")
-    cert_file = os.path.join(cert_dir, "server.crt")
-    key_file = os.path.join(cert_dir, "server.key")
-    has_https = os.path.exists(cert_file) and os.path.exists(key_file)
+    settings = get_settings()
+
+    # 证书路径：优先使用环境变量，否则使用默认位置
+    cert_file = settings.ssl_cert_file or str(settings.default_cert_file) if settings.default_cert_file else None
+    key_file = settings.ssl_key_file or str(settings.default_key_file) if settings.default_key_file else None
+    has_https = cert_file and key_file and os.path.exists(cert_file) and os.path.exists(key_file)
 
     # 检查端口
     port_results = check_ports_available()

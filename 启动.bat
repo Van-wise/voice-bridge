@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Voice Bridge Server
+title Voice Bridge Launcher
 cd /d "%~dp0"
 
 REM 检查 Python
@@ -18,7 +18,7 @@ if not exist "backend\main.py" (
     exit /b 1
 )
 
-REM 启动服务（输出全部由 Python 处理）
-python backend\main.py
+REM 启动服务（独立窗口）
+start "Voice Bridge Server" python backend\main.py
 
-pause
+exit

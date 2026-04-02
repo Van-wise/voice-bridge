@@ -1,5 +1,5 @@
 {
-  "console_visible": true,
+  "console_visible": false,
   "log_mode": "detail",
   "window_handle": null,
   "console_output": true

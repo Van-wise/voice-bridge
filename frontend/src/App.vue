@@ -2,6 +2,19 @@
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import QRCode from 'qrcode'
 import SimpleRecorder from './components/SimpleRecorder.vue'
+import ErrorBoundary from './components/ErrorBoundary.vue'
+import { apiGet, apiPost } from './utils/api'
+import { errorCollector, setToastFunction } from './utils/errorHandler'
+
+// ==================== 错误处理 ====================
+function handleComponentError(error: Error, errorInfo: any) {
+  console.error('[App] 组件错误:', error.message, errorInfo)
+}
+
+// 注册全局 Toast 函数（供 errorHandler 使用）
+setToastFunction((msg: string, type: string) => {
+  showToast(msg, type as 'ok' | 'err' | 'warn' | 'loading')
+})
 
 // ==================== 状态 ====================
 const text = ref('')
@@ -156,8 +169,20 @@ function restartPoll(interval: number) {
 // ==================== 轮询 ====================
 async function doPoll() {
   try {
-    const resp: any = await apiGet(`/api/poll?last_ev=${lastEv.value}`)
-    if (resp.error) return
+    // 使用改进的 API 工具，静默处理轮询错误
+    const result = await apiGet(`/api/poll?last_ev=${lastEv.value}`, { showError: false })
+    
+    if (!result.success || !result.data) {
+      pollFails++
+      if (pollFails >= 3 && isOnline.value) {
+        isOnline.value = false
+        showToast('连接断开', 'err')
+        setDot(false)
+      }
+      return
+    }
+    
+    const resp = result.data
 
     if (!isOnline.value) {
       isOnline.value = true
@@ -514,10 +539,18 @@ function formatTime(timestamp: number) {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+// HTML 转义，防止 XSS 攻击
+function escapeHtml(text: string): string {
+  const div = document.createElement('div')
+  div.textContent = text
+  return div.innerHTML
+}
+
 function highlightSearch(text: string) {
-  if (!historySearch.value) return text
+  const escapedText = escapeHtml(text)
+  if (!historySearch.value) return escapedText
   const keyword = historySearch.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return text.replace(new RegExp(`(${keyword})`, 'gi'), '<mark style="background:#fef08a;padding:0 2px;border-radius:2px;">$1</mark>')
+  return escapedText.replace(new RegExp(`(${keyword})`, 'gi'), '<mark style="background:#fef08a;padding:0 2px;border-radius:2px;">$1</mark>')
 }
 
 // 获取分类标签
@@ -944,8 +977,10 @@ onUnmounted(() => {
       <button class="btn btn-orange" @click="toggleHistory">📜 历史</button>
     </div>
 
-    <!-- 麦克风桥接（移至最下方） -->
-    <SimpleRecorder :deviceId="clientId" />
+    <!-- 麦克风桥接（用 ErrorBoundary 包裹，防止组件错误影响整体） -->
+    <ErrorBoundary @error="handleComponentError" fallbackMessage="麦克风组件加载失败">
+      <SimpleRecorder :deviceId="clientId" />
+    </ErrorBoundary>
 
     <!-- 历史 -->
     <div v-show="showHistory" class="history">

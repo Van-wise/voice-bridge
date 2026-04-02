@@ -14,6 +14,8 @@ import logging
 import threading
 from typing import Optional
 
+from shared.network import get_local_ip
+
 # 托盘依赖
 try:
     from pystray import Menu, MenuItem
@@ -26,10 +28,10 @@ except ImportError:
 
 logger = logging.getLogger("vb")
 
-# 配置存储
+# 配置存储（默认详细模式）
 _config: dict = {
     "console_visible": True,
-    "log_mode": "simple",
+    "log_mode": "detail",  # 默认为详细模式
 }
 _config_file = os.path.join(os.path.dirname(__file__), "..", "tray_config.json")
 
@@ -64,19 +66,6 @@ def _create_icon_image():
     draw.rectangle([24, 44, 40, 58], fill=(255, 255, 255))
     draw.arc([8, 46, 56, 62], 0, 180, fill=(255, 255, 255), width=3)
     return img
-
-
-def _get_local_ip() -> str:
-    """获取本机局域网IP"""
-    try:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
 
 
 def _open_home(icon=None, item=None) -> None:
@@ -135,17 +124,79 @@ def _show_logs(icon=None, item=None) -> None:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
 
+# 记录父进程（bat 脚本）的控制台窗口句柄
+_parent_console_hwnd = None
+
+
+def _close_launcher_window():
+    """关闭 bat 启动脚本的 cmd 窗口"""
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        WM_CLOSE = 0x0010
+        
+        # 通过窗口标题找到 "Voice Bridge Launcher" 窗口
+        launcher_title = "Voice Bridge Launcher"
+        hwnd = user32.FindWindowW(None, launcher_title)
+        if hwnd:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    except Exception:
+        pass
+
+
+def _init_parent_console():
+    """初始化父进程控制台窗口句柄（由 main.py 调用）"""
+    global _parent_console_hwnd
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        # 获取当前控制台窗口句柄
+        _parent_console_hwnd = user32.GetConsoleWindow()
+    except Exception:
+        pass
+    # 立即关闭启动器的 cmd 窗口
+    _close_launcher_window()
+
+
 def _restart_service(icon=None, item=None) -> None:
-    """重启服务"""
-    logger.info("正在重启服务...")
+    """重启服务：关闭当前控制台，启动新控制台"""
+    global _icon, _parent_console_hwnd
+    
+    # 先停止托盘图标
+    if _icon:
+        _icon.stop()
+        _icon = None
+    
+    def _close_server_window():
+        """关闭当前 Voice Bridge Server 窗口"""
+        try:
+            import ctypes
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            WM_CLOSE = 0x0010
+            # 通过标题关闭窗口
+            hwnd = user32.FindWindowW(None, "Voice Bridge Server")
+            if hwnd:
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            # 也关闭记录的主控台窗口
+            if _parent_console_hwnd:
+                user32.PostMessageW(_parent_console_hwnd, WM_CLOSE, 0, 0)
+        except Exception:
+            pass
+    
     try:
         import subprocess
         script_path = os.path.join(os.path.dirname(__file__), "main.py")
         CREATE_NEW_CONSOLE = 0x00000010
-        subprocess.Popen([sys.executable, script_path], creationflags=CREATE_NEW_CONSOLE)
+        # 启动新进程（新建控制台窗口）
+        subprocess.Popen(
+            [sys.executable, script_path],
+            creationflags=CREATE_NEW_CONSOLE,
+            cwd=os.path.dirname(script_path)
+        )
+        # 关闭当前窗口
+        _close_server_window()
     except Exception as e:
         logger.error(f"重启失败: {e}")
-        return
     os._exit(0)
 
 
