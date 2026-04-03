@@ -32,6 +32,30 @@ try:
 except ImportError:
     pass
 
+# ==================== 模块加载时禁用 Pillow 冗余日志（必须提前执行）====================
+# 解决 Pillow Image.py:388 刷屏问题 - 必须在 Pillow 被导入前执行
+try:
+    _pil_logger = logging.getLogger("PIL")
+    _pil_logger.setLevel(logging.WARNING)
+    _pil_logger.propagate = False
+except Exception:
+    pass
+
+try:
+    _pil_img_logger = logging.getLogger("PIL.Image")
+    _pil_img_logger.setLevel(logging.WARNING)
+    _pil_img_logger.propagate = False
+except Exception:
+    pass
+
+# 禁用 asyncio Proactor 冗余日志
+try:
+    _asyncio_logger = logging.getLogger("asyncio")
+    _asyncio_logger.setLevel(logging.WARNING)
+    _asyncio_logger.propagate = False
+except Exception:
+    pass
+
 # ==================== 调试模式控制 ====================
 # 优先级：命令行参数 > 环境变量 > 配置文件
 _DEBUG_MODE: bool = False

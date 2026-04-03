@@ -48,7 +48,11 @@ const stats = ref({
 })
 const toast = ref({ show: false, message: '', type: 'ok' as 'ok' | 'err' | 'warn' | 'loading', fading: false })
 const toastTimer = ref<number | null>(null)
-const clientId = ref(localStorage.getItem('vb_client_id') || ('c' + Math.random().toString(36).substr(2, 9)))
+const clientId = ref(localStorage.getItem('vb_device_id') || ('c' + Math.random().toString(36).substr(2, 9)))
+// 持久化设备ID（统一标识）
+if (!localStorage.getItem('vb_device_id')) {
+  localStorage.setItem('vb_device_id', clientId.value)
+}
 const isPC = computed(() => location.hostname === '127.0.0.1' || location.hostname === 'localhost')
 const charCount = computed(() => text.value.length)
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
@@ -67,7 +71,7 @@ const devices = ref<any[]>([])
 // 齿轮双击
 const gearLastClick = ref(0)
 
-// 轮询（已废弃，改用 WebSocket）
+// 轮询（兜底机制：800ms 间隔拉取事件）
 let pollTimer: number | null = null
 let pollFails = 0
 let sleepCheckTimer: number | null = null
@@ -280,6 +284,11 @@ function handleWsMessage(msg: any) {
         devices.value = msg.data.devices
       }
       break
+    
+    case 'clipboard_clear':
+      text.value = ''
+      logger.info('WS', '收到清空事件')
+      break
       
     default:
       logger.debug('WS', '未知消息类型', { type: msg.type })
@@ -326,17 +335,21 @@ function setDot(on: boolean) {
 function handleEvent(ev: any) {
   if (!ev || !ev.type) return
 
+  // 处理同步文本事件
   if (ev.type === 'sync' && ev.data && ev.data.text !== undefined) {
+    // 使用统一的 clientId（也是 vb_device_id）排除自己
     if (ev.data.client_id === clientId.value) return
     text.value = ev.data.text
     const fromTip = ev.data.device_type === 'mobile' ? '📱 收到同步' : '💻 收到同步'
     showToast(fromTip, 'ok', 1500)
   }
 
+  // 处理 clear 事件（轮询兜底）
   if (ev.type === 'clear') {
-    if (ev.data && ev.data.client_id === clientId.value) return
+    // 检查是否是本设备发起的清空（通过 source_device 排除）
+    if (ev.data && ev.data.source_device === clientId.value) return
     text.value = ''
-    showToast('🧹 对方已清空', 'ok', 1200)
+    showToast('🧹 内容已清空', 'ok', 1200)
   }
 
   if (ev.type === 'settings' && ev.data) {
@@ -575,11 +588,14 @@ function clipboardFallback(text: string, cb: (ok: boolean) => void) {
 // ==================== 清空 ====================
 async function doClear() {
   try {
-    // 先发送到后端，如果成功再清空本地
-    const result = await apiPost('/api/clear', {}, { showError: false, timeout: 5000 })
+    // 传递设备ID供后端识别源设备（用于广播时排除）
+    const headers: Record<string, string> = {
+      'X-Device-Id': clientId.value
+    }
+    const result = await apiPost('/api/clear', {}, { showError: false, timeout: 5000, headers })
     if (result.success) {
       text.value = ''
-      showToast('🧹 已清空（两端同步）', 'ok', 1200)
+      showToast('🧹 已清空', 'ok', 1200)
     } else {
       showToast('清空失败', 'err', 2000)
     }
@@ -981,8 +997,13 @@ onMounted(() => {
   // 初始化：先拉一次初始数据，然后建立 WebSocket 连接
   doPoll()
   
-  // 启动 WebSocket 剪贴板连接（替代轮询）
+  // 启动 WebSocket 剪贴板连接（主通道，保证实时性）
   connectClipboardWS()
+  
+  // 启动轮询兜底（800ms 间隔，保证可靠性）
+  pollTimer = window.setInterval(() => {
+    doPoll()
+  }, 800)
 
   sleepCheckTimer = window.setInterval(checkSleep, 10000)
   const events = ['keydown', 'mousedown', 'touchstart', 'scroll', 'input']
@@ -999,6 +1020,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (toastTimer.value) clearTimeout(toastTimer.value)
+  if (pollTimer) clearInterval(pollTimer)
   if (sleepCheckTimer) clearInterval(sleepCheckTimer)
   disconnectClipboardWS()  // 断开 WebSocket
   document.removeEventListener('click', closeDropdown)

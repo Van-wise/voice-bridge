@@ -58,6 +58,8 @@ export interface ApiOptions {
   errorMessage?: string
   /** 是否抛出异常 */
   throwError?: boolean
+  /** 自定义请求头 */
+  headers?: Record<string, string>
 }
 
 export interface ApiResult<T> {
@@ -151,7 +153,7 @@ export async function apiPost<T = any>(
   body: Record<string, any>,
   options: ApiOptions & { timeout?: number } = {}
 ): Promise<ApiResult<T>> {
-  const { showError = true, errorMessage, throwError = false, timeout = 10000 } = options
+  const { showError = true, errorMessage, throwError = false, timeout = 10000, headers = {} } = options
   const traceId = generateTraceId()
   const startTime = performance.now()
 
@@ -171,6 +173,7 @@ export async function apiPost<T = any>(
         'Content-Type': 'application/json',
         'X-Client-ID': getClientId(),
         'X-Trace-ID': traceId,
+        ...headers,  // 合并自定义 headers
       },
       body: JSON.stringify(body),
       signal: controller.signal,

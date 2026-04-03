@@ -6,7 +6,7 @@ Voice Bridge Backend - WebSocket 管理
 
 import json
 import logging
-from typing import Any
+from typing import Any, Set
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -14,23 +14,44 @@ logger = logging.getLogger("vb.websocket")
 
 
 class ConnectionManager:
-    """WebSocket 连接管理器"""
+    """WebSocket 连接管理器（支持单设备单连接去重）"""
 
     def __init__(self) -> None:
         # device_id -> WebSocket
         self.active_connections: dict[str, WebSocket] = {}
+        # 正在关闭的连接（防止重复关闭）
+        self._closing_connections: Set[str] = set()
 
     async def connect(self, device_id: str, websocket: WebSocket) -> None:
-        """连接"""
+        """连接（自动去重：关闭旧连接再建立新连接）"""
+        # 先关闭旧连接（如果存在）
+        if device_id in self.active_connections:
+            old_ws = self.active_connections[device_id]
+            logger.warning(f"[WS] 设备 {device_id} 已有活跃连接，关闭旧连接（总数：{len(self.active_connections)}）")
+            try:
+                self._closing_connections.add(device_id)
+                await old_ws.close(code=1000, reason="新连接替换旧连接")
+                logger.info(f"[WS] 设备 {device_id} 旧连接已关闭")
+            except Exception as e:
+                logger.debug(f"[WS] 关闭旧连接异常: {e}")
+            finally:
+                self._closing_connections.discard(device_id)
+                if device_id in self.active_connections:
+                    del self.active_connections[device_id]
+        
+        # 接受新连接
         await websocket.accept()
         self.active_connections[device_id] = websocket
-        logger.info(f"Device connected: {device_id} (total: {len(self.active_connections)})")
+        logger.info(f"[WS] 设备连接成功: {device_id} (总数: {len(self.active_connections)})")
 
     def disconnect(self, device_id: str) -> None:
         """断开连接"""
+        if device_id in self._closing_connections:
+            # 正在关闭中，跳过
+            return
         if device_id in self.active_connections:
             del self.active_connections[device_id]
-            logger.info(f"Device disconnected: {device_id} (total: {len(self.active_connections)})")
+            logger.info(f"[WS] 设备断开: {device_id} (总数: {len(self.active_connections)})")
 
     async def send_to_device(self, device_id: str, message: dict[str, Any]) -> bool:
         """发送消息到指定设备"""

@@ -3,7 +3,7 @@
     "name": "k70udd",
     "ip": "192.168.1.25",
     "type": "mobile",
-    "last_seen": 1775138664.2092297
+    "last_seen": 1775225858.3339534
   },
   "18bf6eb9-a790-45dd-846f-f60cfa764318": {
     "name": "12345646",
@@ -16,5 +16,17 @@
     "ip": "192.168.1.9",
     "type": "mobile",
     "last_seen": 1775107532.9148507
+  },
+  "fde3bbeb-f133-4344-afca-4ad4d6d2b3ee": {
+    "name": "电脑-localhost",
+    "ip": "127.0.0.1",
+    "type": "mobile",
+    "last_seen": 1775156478.9697945
+  },
+  "c4721f62-abdb-4b28-ac3b-bacbfd507877": {
+    "name": "电脑-localhost",
+    "ip": "127.0.0.1",
+    "type": "mobile",
+    "last_seen": 1775225941.1777225
   }
 }

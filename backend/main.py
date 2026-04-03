@@ -180,33 +180,42 @@ class AppState:
             # 导入在函数内避免循环导入
             from devices.websocket import manager
             
-            # 根据事件类型选择消息格式
+            # 确保 data 包含 source_device（供轮询兜底使用）
+            if data is None:
+                data = {}
+            data_with_source = {**data, 'source_device': source_device}
+            
+            # 根据事件类型选择消息格式和排除策略
             if etype == 'sync':
                 msg = {
                     'type': 'clipboard_update',
-                    'data': data,
+                    'data': data_with_source,
                     'source': source_device,
                 }
+                exclude = source_device  # 同步事件排除源设备（避免重复接收）
             elif etype == 'settings':
                 msg = {
                     'type': 'settings_update',
-                    'data': data,
+                    'data': data_with_source,
                 }
+                exclude = None  # 设置变更发送给所有设备
             elif etype == 'clear':
                 msg = {
                     'type': 'clipboard_clear',
-                    'data': data,
+                    'data': data_with_source,
                     'source': source_device,
                 }
+                exclude = source_device  # 清空事件排除源设备（避免重复）
             else:
                 msg = {
                     'type': 'event',
                     'event_type': etype,
-                    'data': data,
+                    'data': data_with_source,
                 }
+                exclude = source_device
             
-            # 广播到所有设备（排除源设备）
-            await manager.broadcast(msg, exclude=source_device)
+            # 广播到设备
+            await manager.broadcast(msg, exclude=exclude)
         except Exception as e:
             logger.debug(f"WebSocket 广播失败: {e}")
     
@@ -515,19 +524,29 @@ async def sync_text(
             logger.error(f"Clipboard copy failed: {e}")
             action = 'copy_failed'
     
-    # 清空逻辑
+    # 清空逻辑：用户主动点同步按钮 + 开启了自动清空
     should_clear = auto_clear and manual_sync
+    
+    if should_clear:
+        # 源设备本地清空剪贴板
+        try:
+            import pyperclip
+            pyperclip.copy("")
+        except Exception as e:
+            logger.debug(f"清空本地剪贴板失败: {e}")
+        
+        # 清空服务端状态
+        with state.lock:
+            state.text = ""
+            state.text_version += 1
+        
+        # 广播清空事件（不包含 client_id）
+        state.push_event('clear', {'by': source})
     
     # 日志格式
     content_preview = text[:30] + "..." if len(text) > 30 else text
     logger.info(f'Sync to text: "{content_preview}"')
     logger.info(f'from={source}, mode={mode}, len={len(text)}, action={action}, cleared={should_clear}')
-    
-    if should_clear:
-        with state.lock:
-            state.text = ""
-            state.text_version += 1
-        state.push_event('clear', {'by': source})
     
     return {
         'success': True,
@@ -566,8 +585,16 @@ async def update_settings(request_data: dict):
 
 
 @legacy_router.post("/clear")
-async def clear_text():
+async def clear_text(request: Request = None):
     """清空文本"""
+    source = 'mobile'
+    # 从请求头获取前端传递的设备ID（用于广播时排除源设备）
+    source_device = 'unknown'
+    if request:
+        client_ip = request.client.host if request.client else "?"
+        source = 'pc' if client_ip in ('127.0.0.1', '::1', 'localhost') else 'mobile'
+        source_device = request.headers.get('X-Device-Id', 'unknown')
+    
     with state.lock:
         old_text = state.text
         if old_text and old_text.strip():
@@ -575,8 +602,9 @@ async def clear_text():
             state.text_version += 1
             state.save_history(old_text)
     
-    state.push_event('clear')
-    logger.info("Text cleared")
+    # 修复：传递 source_device 参数，广播时正确排除源设备
+    state.push_event('clear', {'by': source}, source_device=source_device)
+    logger.info(f"Text cleared | source={source}, device={source_device}")
     
     return {'success': True}
 
