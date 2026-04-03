@@ -76,9 +76,9 @@ export function getApiBase(): string {
   return window.location.origin
 }
 
-/** 获取客户端 ID */
+/** 获取客户端 ID（统一使用 vb_device_id，与 WebSocket 连接保持一致） */
 export function getClientId(): string {
-  return localStorage.getItem('vb_client_id') || ('c' + Math.random().toString(36).substr(2, 9))
+  return localStorage.getItem('vb_device_id') || ('c' + Math.random().toString(36).substr(2, 9))
 }
 
 /** 判断是否本地访问 */

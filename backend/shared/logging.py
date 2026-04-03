@@ -617,14 +617,21 @@ def get_recent_logs_tail(lines: int = 50) -> str:
 def _suppress_asyncio_warnings() -> None:
     """抑制 asyncio 相关已知问题的异常输出"""
     import asyncio
+    import socket
     
     _original_excepthook = sys.excepthook
     
     def _custom_excepthook(exc_type, exc_value, exc_traceback):
+        # 抑制 Windows asyncio Proactor 连接丢失异常
         if exc_type is RuntimeError and exc_value and "_ProactorBasePipeTransport._call_connection_lost" in str(exc_value):
             return
         if exc_type is AttributeError and exc_value and "_call_connection_lost" in str(exc_value):
             return
+        # 抑制 ConnectionResetError（远程主机强迫关闭连接）
+        if exc_type is ConnectionResetError:
+            return
+        if exc_type is OSError and exc_value and "10054" in str(exc_value):
+            return  # WinError 10054 = ConnectionResetError
         _original_excepthook(exc_type, exc_value, exc_traceback)
     
     sys.excepthook = _custom_excepthook

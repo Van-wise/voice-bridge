@@ -126,7 +126,7 @@ class AppState:
     """全局应用状态"""
     def __init__(self):
         import threading
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # 使用可重入锁，避免同一线程内死锁
         self.text: str = ""
         self.text_version: int = 0
         self.events: list = []
@@ -146,10 +146,12 @@ class AppState:
         """推送事件到前端（同时存储和 WebSocket 广播）"""
         with self.lock:
             self.event_ver += 1
+            # 关键修复：存储事件时也要包含 source_device，让轮询能正确排除
+            data_with_source = {**(data or {}), 'source_device': source_device}
             event = {
                 'ver': self.event_ver,
                 'type': etype,
-                'data': data or {},
+                'data': data_with_source,  # 现在 data 包含 source_device
                 'ts': time.time(),
             }
             self.events.append(event)
@@ -217,7 +219,10 @@ class AppState:
             # 广播到设备
             await manager.broadcast(msg, exclude=exclude)
         except Exception as e:
-            logger.debug(f"WebSocket 广播失败: {e}")
+            # 从 debug 改为 error，强制暴露问题
+            logger.error(f"[事件] {etype} 广播失败: {str(e)}", exc_info=True)
+            # 不吞异常！向上抛出，让调用方感知
+            raise
     
     def get_events_since(self, last_ver: int) -> list:
         with self.lock:
@@ -466,17 +471,34 @@ async def sync_text(
     request_data: dict,
     request: Request = None,
 ):
-    """同步文本（旧版兼容）"""
+    """同步文本"""
     text = request_data.get('text', '')
     mode = request_data.get('mode', state.settings.get('mode', 'auto'))
     auto_clear = request_data.get('auto_clear', state.settings.get('auto_clear', True))
     manual_sync = request_data.get('manual', False)
     
-    client_ip = request.client.host if request.client else "?"
-    ua = request.headers.get('User-Agent', '')
+    # 通过 WebSocket 连接的 IP 来识别设备（不依赖前端传参）
+    client_id = 'unknown'
+    client_ip = 'unknown'
+    
+    if request:
+        # 优先从请求头获取真实 IP（代理模式）
+        forwarded = request.headers.get('X-Forwarded-For')
+        if forwarded:
+            client_ip = forwarded.split(',')[0].strip()
+        else:
+            real_ip = request.headers.get('X-Real-IP')
+            if real_ip:
+                client_ip = real_ip
+            elif request.client:
+                client_ip = request.client.host
+        
+        client_id = manager.get_device_by_ip(client_ip) or 'unknown'
+    
     is_pc = client_ip in ('127.0.0.1', '::1', 'localhost')
     source = 'pc' if is_pc else 'mobile'
     
+    ua = request.headers.get('User-Agent', '') if request else ''
     if any(x in ua.lower() for x in ['mobile', 'android', 'iphone', 'ipad']):
         device_type = 'mobile'
     else:
@@ -493,13 +515,13 @@ async def sync_text(
         state.save_history(old_text, overwritten=True)
     state.save_history(text)
     
-    # 推送事件
+    # 推送事件（使用与 WebSocket 相同的 device_id）
     state.push_event('sync', {
         'text': text,
         'source': source,
-        'client_id': request.headers.get('X-Client-ID', 'unknown'),
+        'client_id': client_id,
         'device_type': device_type,
-    })
+    }, source_device=client_id)
     
     # 执行操作
     action = 'synced'
@@ -540,8 +562,8 @@ async def sync_text(
             state.text = ""
             state.text_version += 1
         
-        # 广播清空事件（不包含 client_id）
-        state.push_event('clear', {'by': source})
+        # 广播清空事件（补传 source_device，让前端能排除自己发的清空）
+        state.push_event('clear', {'by': source}, source_device=client_id)
     
     # 日志格式
     content_preview = text[:30] + "..." if len(text) > 30 else text
@@ -585,15 +607,29 @@ async def update_settings(request_data: dict):
 
 
 @legacy_router.post("/clear")
-async def clear_text(request: Request = None):
+async def clear_text(request_data: dict = None, request: Request = None):
     """清空文本"""
     source = 'mobile'
-    # 从请求头获取前端传递的设备ID（用于广播时排除源设备）
+    
+    # 通过 WebSocket 连接的 IP 来识别设备（不依赖前端传参）
     source_device = 'unknown'
+    client_ip = 'unknown'
+    
     if request:
-        client_ip = request.client.host if request.client else "?"
+        # 优先从请求头获取真实 IP（代理模式）
+        forwarded = request.headers.get('X-Forwarded-For')
+        if forwarded:
+            client_ip = forwarded.split(',')[0].strip()
+        else:
+            real_ip = request.headers.get('X-Real-IP')
+            if real_ip:
+                client_ip = real_ip
+            elif request.client:
+                client_ip = request.client.host
+        
         source = 'pc' if client_ip in ('127.0.0.1', '::1', 'localhost') else 'mobile'
-        source_device = request.headers.get('X-Device-Id', 'unknown')
+        # 从 WebSocket 连接映射中查找设备 ID
+        source_device = manager.get_device_by_ip(client_ip) or 'unknown'
     
     with state.lock:
         old_text = state.text
@@ -602,9 +638,8 @@ async def clear_text(request: Request = None):
             state.text_version += 1
             state.save_history(old_text)
     
-    # 修复：传递 source_device 参数，广播时正确排除源设备
+    # 广播清空事件，排除源设备
     state.push_event('clear', {'by': source}, source_device=source_device)
-    logger.info(f"Text cleared | source={source}, device={source_device}")
     
     return {'success': True}
 

@@ -71,10 +71,11 @@ const devices = ref<any[]>([])
 // 齿轮双击
 const gearLastClick = ref(0)
 
-// 轮询（兜底机制：800ms 间隔拉取事件）
+// 轮询（兜底机制：WebSocket 断开时才轮询）
 let pollTimer: number | null = null
 let pollFails = 0
 let sleepCheckTimer: number | null = null
+let isWsConnected = false  // WebSocket 连接状态
 
 // WebSocket 剪贴板连接
 let wsClipboard: WebSocket | null = null
@@ -203,8 +204,23 @@ async function doPoll() {
 }
 
 // ==================== WebSocket 剪贴板连接 ====================
+// 避免重复处理事件的标记（用于去重）
+const eventDedupe = new Map<string, number>()
+
+// 确保 vb_device_id 一定存在（防御性代码）
+function ensureDeviceId(): string {
+  let deviceId = localStorage.getItem('vb_device_id')
+  if (!deviceId) {
+    deviceId = 'd' + Math.random().toString(36).substr(2, 11)
+    localStorage.setItem('vb_device_id', deviceId)
+    console.log('[VB] 生成新设备ID:', deviceId)
+  }
+  return deviceId
+}
+
 function connectClipboardWS() {
-  const deviceId = localStorage.getItem('vb_device_id') || 'unknown'
+  // 确保 deviceId 存在
+  const deviceId = ensureDeviceId()
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   
@@ -212,6 +228,7 @@ function connectClipboardWS() {
   
   wsClipboard.onopen = () => {
     isOnline.value = true
+    isWsConnected = true
     setDot(true)
     pollFails = 0
     showToast('已连接', 'ok', 1500)
@@ -232,6 +249,7 @@ function connectClipboardWS() {
   
   wsClipboard.onclose = () => {
     isOnline.value = false
+    isWsConnected = false
     setDot(false)
     stopWsHeartbeat()
     logger.warn('WS', '剪贴板 WebSocket 断开，3秒后重连')
@@ -253,6 +271,22 @@ function connectClipboardWS() {
 function handleWsMessage(msg: any) {
   if (!msg || !msg.type) return
   
+  // 事件去重：基于 type 和 source_device + timestamp
+  const eventKey = `${msg.type}_${msg.source || ''}_${msg.data?.source_device || ''}`
+  const now = Date.now()
+  const lastTime = eventDedupe.get(eventKey)
+  if (lastTime && now - lastTime < 500) {
+    // 500ms 内相同事件直接忽略
+    return
+  }
+  eventDedupe.set(eventKey, now)
+  // 清理过期标记（避免内存泄漏）
+  if (eventDedupe.size > 100) {
+    for (const [key, time] of eventDedupe) {
+      if (now - time > 5000) eventDedupe.delete(key)
+    }
+  }
+  
   switch (msg.type) {
     case 'pong':
       // 心跳响应，不需要处理
@@ -261,7 +295,9 @@ function handleWsMessage(msg: any) {
     case 'clipboard_update':
       // 收到剪贴板更新
       if (msg.data && msg.data.text !== undefined) {
-        if (msg.source !== localStorage.getItem('vb_device_id')) {
+        // 检查是否是本设备发起的同步（通过 source 排除）
+        const myDeviceId = localStorage.getItem('vb_device_id')
+        if (msg.source !== myDeviceId) {
           text.value = msg.data.text
           const fromTip = msg.data.device_type === 'mobile' ? '📱 收到同步' : '💻 收到同步'
           showToast(fromTip, 'ok', 1500)
@@ -286,8 +322,12 @@ function handleWsMessage(msg: any) {
       break
     
     case 'clipboard_clear':
-      text.value = ''
-      logger.info('WS', '收到清空事件')
+      // 收到清空事件（WebSocket 实时通道）
+      const myDeviceId2 = localStorage.getItem('vb_device_id')
+      if (msg.data?.source_device !== myDeviceId2) {
+        text.value = ''
+        showToast('🧹 内容已清空', 'ok', 1200)
+      }
       break
       
     default:
@@ -588,11 +628,7 @@ function clipboardFallback(text: string, cb: (ok: boolean) => void) {
 // ==================== 清空 ====================
 async function doClear() {
   try {
-    // 传递设备ID供后端识别源设备（用于广播时排除）
-    const headers: Record<string, string> = {
-      'X-Device-Id': clientId.value
-    }
-    const result = await apiPost('/api/clear', {}, { showError: false, timeout: 5000, headers })
+    const result = await apiPost('/api/clear', {}, { showError: false, timeout: 5000 })
     if (result.success) {
       text.value = ''
       showToast('🧹 已清空', 'ok', 1200)
@@ -1000,10 +1036,12 @@ onMounted(() => {
   // 启动 WebSocket 剪贴板连接（主通道，保证实时性）
   connectClipboardWS()
   
-  // 启动轮询兜底（800ms 间隔，保证可靠性）
+  // 启动轮询兜底（仅在 WebSocket 断开时轮询，保证可靠性）
   pollTimer = window.setInterval(() => {
-    doPoll()
-  }, 800)
+    if (!isWsConnected) {
+      doPoll()
+    }
+  }, 2000)  // 2秒间隔，仅断开时轮询
 
   sleepCheckTimer = window.setInterval(checkSleep, 10000)
   const events = ['keydown', 'mousedown', 'touchstart', 'scroll', 'input']
